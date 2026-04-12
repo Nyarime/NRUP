@@ -56,8 +56,8 @@ func clientHandshake(conn *net.UDPConn, serverAddr *net.UDPAddr, cfg *Config) ([
 	buf := make([]byte, 4096)
 	var n int
 	var readErr error
-	for retry := 0; retry < 3; retry++ {
-		conn.SetReadDeadline(time.Now().Add(time.Duration(800*(1+retry)) * time.Millisecond))
+	for retry := 0; retry < 5; retry++ {
+		conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond * time.Duration(1<<uint(retry))))
 		n, _, readErr = conn.ReadFromUDP(buf)
 		if readErr == nil {
 			break
@@ -72,7 +72,7 @@ func clientHandshake(conn *net.UDPConn, serverAddr *net.UDPAddr, cfg *Config) ([
 	if n > 13 && buf[0] == 22 && buf[13] == 0x03 {
 		// 收到Cookie挑战，重发ClientHello（重试3次，指数退避）
 		var serverErr error
-		for retry := 0; retry < 3; retry++ {
+		for retry := 0; retry < 5; retry++ {
 			conn.WriteToUDP(hello, serverAddr)
 			timeout := 500 * time.Millisecond * time.Duration(1<<retry)
 			conn.SetReadDeadline(time.Now().Add(timeout))

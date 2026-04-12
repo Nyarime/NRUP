@@ -138,7 +138,7 @@ func (l *Listener) Accept() (*Conn, error) {
 		hvr := buildHelloVerifyRequest(cookie)
 		l.udpConn.WriteToUDP(hvr, clientAddr)
 		var cookieErr error
-		for retry := 0; retry < 3; retry++ {
+		for retry := 0; retry < 5; retry++ {
 			timeout := 300 * time.Millisecond * time.Duration(1<<retry)
 			dc.SetReadDeadline(time.Now().Add(timeout))
 			n2, _, err := dc.ReadFrom(buf)
