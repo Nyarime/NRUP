@@ -105,7 +105,7 @@ func clientHandshake(conn *net.UDPConn, serverAddr *net.UDPAddr, cfg *Config) ([
 		}
 		expected := verifyPSK(cfg.PSK, sharedSecret[:], serverRandom, clientRandom)
 		if !hmac.Equal(macBuf[:n], expected) {
-			return nil, fmt.Errorf("PSK mismatch: MITM detected")
+			return nil, fmt.Errorf("PSK mismatch") // 静默丢弃，不回复对端
 		}
 	}
 
@@ -158,11 +158,11 @@ func serverHandshake(conn *net.UDPConn, clientAddr *net.UDPAddr, firstPacket []b
 		conn.SetReadDeadline(time.Now().Add(handshakeTimeout))
 		n, _, err := conn.ReadFromUDP(macBuf)
 		if err != nil || n != 32 {
-			return nil, fmt.Errorf("PSK auth timeout")
+			return nil, fmt.Errorf("auth timeout") // 静默丢弃
 		}
 		expected := verifyPSK(cfg.PSK, sharedSecret[:], clientRandom, serverRandom)
 		if !hmac.Equal(macBuf[:n], expected) {
-			return nil, fmt.Errorf("PSK mismatch: MITM detected")
+			return nil, fmt.Errorf("PSK mismatch") // 静默丢弃，不回复对端
 		}
 		// 发送服务端认证
 		serverMAC := verifyPSK(cfg.PSK, sharedSecret[:], serverRandom, clientRandom)
@@ -290,6 +290,10 @@ func buildAnyConnectServerHello(random, pubkey []byte) []byte {
 func parseClientHello(pkt []byte) (random, pubkey []byte, err error) {
 	if len(pkt) < 13 || pkt[0] != 22 {
 		return nil, nil, errors.New("not a DTLS handshake")
+	}
+	// 验证DTLS版本 (0xFEFF=1.0 或 0xFEFD=1.2)
+	if pkt[1] != 0xFE || (pkt[2] != 0xFF && pkt[2] != 0xFD) {
+		return nil, nil, errors.New("invalid DTLS version")
 	}
 	// Skip record header (13) + handshake header (12) + version (2)
 	offset := 13 + 12 + 2
