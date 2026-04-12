@@ -158,3 +158,4 @@ func testMultiConn(t *testing.T, count int) {
 		t.Errorf("Too few: %d/%d", passed, count)
 	}
 }
+

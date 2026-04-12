@@ -18,6 +18,9 @@ type Config struct {
 	Cipher       CipherType // auto/aes-256-gcm/chacha20-poly1305/xchacha20-poly1305
 	PSK          []byte // 预共享密钥（防MITM，可选）
 	ResumeID     string // 上次连接的SessionID（0-RTT恢复用）
+	AuthMode     string // "psk"(默认) 或 "ed25519"
+	PrivateKey   []byte // Ed25519私钥(64字节)
+	PeerPublicKey []byte // 对方Ed25519公钥(32字节)
 
 	HandshakeTimeout time.Duration
 	IdleTimeout      time.Duration

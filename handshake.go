@@ -2,6 +2,7 @@ package nrup
 
 import (
 	"crypto/rand"
+	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/sha256"
 	"io"
@@ -76,7 +77,21 @@ func clientHandshake(conn *net.UDPConn, serverAddr *net.UDPAddr, cfg *Config) ([
 
 	key := deriveSessionKey(sharedSecret[:], clientRandom, serverRandom)
 
-	// PSK认证（防MITM）
+	// TODO: Ed25519在demux模式下需要通过虚拟连接收发签名
+	// Ed25519签名认证
+	if cfg.AuthMode == "ed25519" && len(cfg.PrivateKey) > 0 && len(cfg.PeerPublicKey) > 0 {
+		sig := signHandshake(cfg.PrivateKey, sharedSecret[:], clientRandom, serverRandom)
+		conn.WriteToUDP(sig, serverAddr)
+		conn.SetReadDeadline(time.Now().Add(handshakeTimeout))
+		sigBuf := make([]byte, 128)
+		sn, _, _ := conn.ReadFromUDP(sigBuf)
+		if !verifyHandshakeSignature(cfg.PeerPublicKey, sigBuf[:sn], sharedSecret[:], serverRandom, clientRandom) {
+			return nil, fmt.Errorf("ed25519 verify failed")
+		}
+		conn.SetReadDeadline(time.Time{})
+	}
+
+		// PSK认证（防MITM）
 	if len(cfg.PSK) > 0 {
 		// 发送客户端认证
 		clientMAC := verifyPSK(cfg.PSK, sharedSecret[:], clientRandom, serverRandom)
@@ -121,6 +136,20 @@ func serverHandshake(conn *net.UDPConn, clientAddr *net.UDPAddr, firstPacket []b
 	curve25519.ScalarMult(&sharedSecret, &serverPrivate, &clientPub)
 
 	key := deriveSessionKey(sharedSecret[:], clientRandom, serverRandom)
+
+	// TODO: Ed25519在demux模式下需要通过虚拟连接收发签名
+	// Ed25519签名认证
+	if cfg.AuthMode == "ed25519" && len(cfg.PrivateKey) > 0 && len(cfg.PeerPublicKey) > 0 {
+		conn.SetReadDeadline(time.Now().Add(handshakeTimeout))
+		sigBuf := make([]byte, 128)
+		sn, _, _ := conn.ReadFromUDP(sigBuf)
+		if !verifyHandshakeSignature(cfg.PeerPublicKey, sigBuf[:sn], sharedSecret[:], clientRandom, serverRandom) {
+			return nil, fmt.Errorf("ed25519 verify failed")
+		}
+		sig := signHandshake(cfg.PrivateKey, sharedSecret[:], serverRandom, clientRandom)
+		conn.WriteToUDP(sig, clientAddr)
+		conn.SetReadDeadline(time.Time{})
+	}
 
 	// PSK认证（防MITM）
 	if len(cfg.PSK) > 0 {
@@ -346,4 +375,15 @@ func buildHelloVerifyRequest(cookie []byte) []byte {
 	copy(record[13:], handshake)
 
 	return record
+}
+
+// signHandshake Ed25519签名
+func signHandshake(privKey, sharedSecret, clientRandom, serverRandom []byte) []byte {
+	msg := append(append(append([]byte{}, sharedSecret...), clientRandom...), serverRandom...)
+	return ed25519.Sign(privKey, msg)
+}
+
+func verifyHandshakeSignature(pubKey, sig, sharedSecret, clientRandom, serverRandom []byte) bool {
+	msg := append(append(append([]byte{}, sharedSecret...), clientRandom...), serverRandom...)
+	return ed25519.Verify(pubKey, msg, sig)
 }
