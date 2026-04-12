@@ -75,11 +75,15 @@ func (f *FECCodec) Encode(data []byte) [][]byte {
 }
 
 func (f *FECCodec) Decode(frame []byte) []byte {
-	if len(frame) < 8 { return nil }
+	if len(frame) < 9 { return nil }
 
 	seq := binary.BigEndian.Uint32(frame[0:4])
 	index := int(frame[4])
 	total := int(frame[5])
+	if total <= 0 || total > 255 || index >= total {
+		return nil
+	}
+	if total > 64 { return nil } // 合理上限
 	dataLen := int(binary.BigEndian.Uint16(frame[6:8]))
 	shard := frame[8:]
 
@@ -98,7 +102,7 @@ func (f *FECCodec) Decode(frame []byte) []byte {
 		f.recvPool[seq] = group
 	}
 
-	if index < total && !group.present[index] {
+	if index < group.total && index < total && !group.present[index] {
 		group.shards[index] = make([]byte, len(shard))
 		copy(group.shards[index], shard)
 		group.present[index] = true
@@ -106,13 +110,13 @@ func (f *FECCodec) Decode(frame []byte) []byte {
 	}
 
 	if group.received >= f.dataShards && !group.decoded {
-		for i := 0; i < total; i++ {
+		for i := 0; i < group.total; i++ {
 			if !group.present[i] { group.shards[i] = nil }
 		}
 		err := f.encoder.Reconstruct(group.shards)
 		if err == nil {
 			group.decoded = true
-			delete(f.recvPool, seq)
+			// 保留group不删除，防止重传帧创建新group重复解码
 			result := make([]byte, 0, group.dataLen)
 			for i := 0; i < f.dataShards; i++ {
 				result = append(result, group.shards[i]...)

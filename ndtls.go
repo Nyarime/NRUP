@@ -95,9 +95,9 @@ func (mc *NDTLSConn) Write(p []byte) (int, error) {
 
 	seqNum := mc.writeSeq.Add(1)
 	if mc.disgui == "quic" {
-		// QUIC Short Header: [0x40|PN_LEN][8B connID][2B pktNum][payload]
-		buf[0] = 0x40 | 0x01 // Fixed bit + 2-byte PN
-		// Connection ID (用epoch+seq低6字节模拟)
+		// QUIC Short Header: [0x41][8B connID][2B pktNum][payload]
+		// 无length字段（真QUIC靠UDP包边界定长）
+		buf[0] = 0x41 // Fixed bit + 2-byte PN
 		buf[1] = byte(mc.writeEpoch >> 8)
 		buf[2] = byte(mc.writeEpoch)
 		buf[3] = byte(seqNum >> 40)
@@ -106,10 +106,10 @@ func (mc *NDTLSConn) Write(p []byte) (int, error) {
 		buf[6] = byte(seqNum >> 16)
 		buf[7] = byte(seqNum >> 8)
 		buf[8] = byte(seqNum)
-		// Packet Number (2 bytes)
 		buf[9] = byte(seqNum >> 8)
 		buf[10] = byte(seqNum)
-		// Length (2 bytes, same position as DTLS)
+		// payload直接从buf[11]开始（无length字段）
+		// 但为内部兼容保留2B空间（Read通过n-headerLen算长度）
 		binary.BigEndian.PutUint16(buf[11:13], uint16(payloadLen))
 	} else {
 		// DTLS记录头
@@ -150,10 +150,10 @@ func (mc *NDTLSConn) Read(p []byte) (int, error) {
 	var recvSeq uint64
 	var payloadLen uint16
 	if buf[0]&0x80 == 0 && buf[0]&0x40 != 0 {
-		// QUIC Short Header
+		// QUIC Short Header（无length字段，用UDP包长度算）
 		recvSeq = uint64(buf[3])<<40 | uint64(buf[4])<<32 | uint64(buf[5])<<24 |
 			uint64(buf[6])<<16 | uint64(buf[7])<<8 | uint64(buf[8])
-		payloadLen = binary.BigEndian.Uint16(buf[11:13])
+		payloadLen = uint16(n - recordHeaderLen)
 	} else {
 		// DTLS记录头
 		contentType := buf[0]

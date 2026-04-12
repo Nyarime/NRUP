@@ -67,7 +67,7 @@ func (c *Conn) Write(p []byte) (int, error) {
 	}
 	// 自适应调整FEC比例
 	c.adaptive.RecordSent(1)
-	if c.adaptive.sent >= 100 {
+	if c.adaptive.sent >= 30 {
 		data, parity := c.adaptive.Adjust()
 		if data != c.fec.dataShards || parity != c.fec.parityShards {
 			c.fec = NewFECCodec(data, parity)
@@ -205,7 +205,8 @@ func (c *Conn) startRetransmitLoop() {
 			expired := c.retransmit.GetExpired()
 			for _, r := range expired {
 				for _, frame := range r.Frames {
-					c.dtls.Write(frame) //nolint:errcheck retransmit
+					tagged := append([]byte{FrameData}, frame...)
+					c.dtls.Write(tagged)
 				}
 				c.adaptive.RecordLoss(1)
 			}

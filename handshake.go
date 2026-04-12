@@ -49,14 +49,23 @@ func clientHandshake(conn *net.UDPConn, serverAddr *net.UDPAddr, cfg *Config) ([
 	} else {
 		hello = buildAnyConnectClientHello(clientRandom, clientPublic[:])
 	}
+	// 发送ClientHello（超时重发，最多3次）
 	conn.WriteToUDP(hello, serverAddr)
 
-	// 读响应（可能是HelloVerifyRequest或ServerHello）
-	conn.SetReadDeadline(time.Now().Add(handshakeTimeout))
+	// 读响应（超时重发ClientHello，最多3次）
 	buf := make([]byte, 4096)
-	n, _, err := conn.ReadFromUDP(buf)
-	if err != nil {
-		return nil, fmt.Errorf("handshake timeout: %w", err)
+	var n int
+	var readErr error
+	for retry := 0; retry < 3; retry++ {
+		conn.SetReadDeadline(time.Now().Add(time.Duration(800*(1+retry)) * time.Millisecond))
+		n, _, readErr = conn.ReadFromUDP(buf)
+		if readErr == nil {
+			break
+		}
+		conn.WriteToUDP(hello, serverAddr)
+	}
+	if readErr != nil {
+		return nil, fmt.Errorf("handshake timeout: %w", readErr)
 	}
 
 	// 检查是否是HelloVerifyRequest（handshake type 0x03）
