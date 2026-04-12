@@ -36,11 +36,11 @@ func main() {
 		}
 		time.Sleep(50 * time.Millisecond)
 
-		cfg := &nrup.Config{FECData: 10, FECParity: 3}
+		cfg := nrup.DefaultConfig()
 		sent, recv, latency := runTest(cfg, 30)
 
 		fmt.Printf("  %-20s | %3d/%-3d %3.0f%% | %8s | %10s\n",
-			sc.name, recv, sent, float64(recv)/float64(sent)*100,
+			sc.name, recv, sent, float64(recv)/float64(max(sent,1))*100,
 			latency.Round(100*time.Microsecond),
 			fecStatus(sent, recv))
 	}
@@ -69,14 +69,23 @@ func runTest(cfg *nrup.Config, count int) (sent, recv int, avgLat time.Duration)
 
 	conn, err := nrup.Dial(listener.Addr().String(), cfg)
 	if err != nil { return }
-	defer conn.Close()
 
 	start := time.Now()
 	for i := 0; i < count; i++ {
 		conn.Write([]byte(fmt.Sprintf("test-packet-%04d", i)))
 		time.Sleep(10 * time.Millisecond)
 	}
-	time.Sleep(1500 * time.Millisecond) // 等FEC/ARQ恢复
+
+	// 动态等待：直到所有包到达或超时3秒
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if int(serverRecv.Load()) >= count {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	conn.Close()
 
 	sent = count
 	recv = int(serverRecv.Load())
@@ -93,3 +102,5 @@ func fecStatus(sent, recv int) string {
 	if recv >= sent*7/10 { return "⚠️ 部分" }
 	return "❌ 严重丢失"
 }
+
+func max(a, b int) int { if a > b { return a }; return b }

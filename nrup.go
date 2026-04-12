@@ -56,6 +56,7 @@ type Conn struct {
 	streamMode bool
 	writeMu    sync.Mutex
 	readBuf    []byte
+	seenSmall  map[uint32]bool
 	sessionID  string // 连接迁移用
 }
 
@@ -66,6 +67,24 @@ func (c *Conn) Write(p []byte) (int, error) {
 	if c.streamMode {
 		return c.dtls.Write(p)
 	}
+
+	// 小包优化：数据<256字节时不拆分FEC，直接发2份冗余
+	if len(p) < 256 {
+		seq := uint32(c.pktsSent.Add(1))
+		// [FrameData][4B seq][data]
+		pkt := make([]byte, 1+4+len(p))
+		pkt[0] = FrameData
+		pkt[1] = byte(seq >> 24)
+		pkt[2] = byte(seq >> 16)
+		pkt[3] = byte(seq >> 8)
+		pkt[4] = byte(seq)
+		copy(pkt[5:], p)
+		c.dtls.Write(pkt)
+		c.dtls.Write(pkt) // 冗余副本
+		c.bytesSent.Add(int64(len(p)))
+		return len(p), nil
+	}
+
 	// 自适应调整FEC比例
 	c.adaptive.RecordSent(1)
 	if c.adaptive.sent >= 30 {
@@ -132,19 +151,27 @@ func (c *Conn) Read(p []byte) (int, error) {
 				continue
 
 			case FrameData:
-				// 数据帧 → 发ACK + FEC解码
-				payload := buf[1:n] // 去掉FrameData前缀
-				df := DecodeDataFrame(payload)
-				if df != nil {
-					ackFrame := EncodeACKFrame(df.Seq, 0)
-					c.dtls.Write(ackFrame)
-				}
+				payload := buf[1:n]
+				// 尝试FEC解码
 				decoded := c.fec.Decode(payload)
 				if decoded != nil {
 					c.bytesRecv.Add(int64(len(decoded)))
 					c.pktsRecv.Add(1)
 					copy(p, decoded)
 					return len(decoded), nil
+				}
+				// 小包模式：带序号去重
+				if len(payload) >= 4 && len(payload) < 260 {
+					seq := uint32(payload[0])<<24 | uint32(payload[1])<<16 | uint32(payload[2])<<8 | uint32(payload[3])
+					data := payload[4:]
+					// 去重：检查是否已收过
+					if c.smallPktSeen(seq) {
+						continue
+					}
+					c.bytesRecv.Add(int64(len(data)))
+					c.pktsRecv.Add(1)
+					copy(p, data)
+					return len(data), nil
 				}
 				continue
 			}
@@ -278,4 +305,25 @@ func (c *Conn) GetMetrics() Metrics {
 		BytesSent:   c.bytesSent.Load(),
 		BytesRecv:   c.bytesRecv.Load(),
 	}
+}
+
+// smallPktSeen 小包去重（滑动窗口）
+func (c *Conn) smallPktSeen(seq uint32) bool {
+	c.writeMu.Lock() // 复用writeMu
+	defer c.writeMu.Unlock()
+	if c.seenSmall == nil {
+		c.seenSmall = make(map[uint32]bool)
+	}
+	if c.seenSmall[seq] {
+		return true
+	}
+	c.seenSmall[seq] = true
+	// 清理旧条目（保留最近1000个）
+	if len(c.seenSmall) > 1000 {
+		for k := range c.seenSmall {
+			delete(c.seenSmall, k)
+			if len(c.seenSmall) <= 500 { break }
+		}
+	}
+	return false
 }
