@@ -314,3 +314,50 @@ func TestEd25519Auth(t *testing.T) {
 	conn.Write([]byte("ed25519-authenticated"))
 	t.Logf("✅ Ed25519 auth OK (session: %s)", conn.SessionID()[:8])
 }
+
+func Test0RTTResume(t *testing.T) {
+	cfg := DefaultConfig()
+	listener, err := Listen(":0", cfg)
+	if err != nil { t.Fatal(err) }
+	defer listener.Close()
+
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil { return }
+			go func() {
+				defer conn.Close()
+				buf := make([]byte, 4096)
+				for {
+					n, err := conn.Read(buf)
+					if err != nil { return }
+					conn.Write(buf[:n])
+				}
+			}()
+		}
+	}()
+
+	// 第一次连接：完整握手
+	conn1, err := Dial(listener.Addr().String(), cfg)
+	if err != nil { t.Fatal("First dial:", err) }
+	
+	conn1.Write([]byte("hello"))
+	buf := make([]byte, 4096)
+	n, _ := conn1.Read(buf)
+	t.Logf("First conn: echo=%q, sessionID=%s", string(buf[:n]), conn1.SessionID()[:8])
+	
+	sessionID := conn1.SessionID()
+	conn1.Close()
+
+	// 第二次连接：0-RTT恢复
+	cfg2 := DefaultConfig()
+	cfg2.ResumeID = sessionID
+	
+	conn2, err := Dial(listener.Addr().String(), cfg2)
+	if err != nil { t.Fatal("0-RTT dial:", err) }
+	defer conn2.Close()
+	
+	conn2.Write([]byte("resumed!"))
+	n, _ = conn2.Read(buf)
+	t.Logf("✅ 0-RTT resume: echo=%q, sessionID=%s", string(buf[:n]), conn2.SessionID()[:8])
+}

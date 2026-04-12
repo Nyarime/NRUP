@@ -88,7 +88,7 @@ func clientResume(conn *net.UDPConn, serverAddr *net.UDPAddr, sessionID string) 
 }
 
 // serverResume 处理0-RTT恢复请求
-func serverResume(conn *net.UDPConn, clientAddr *net.UDPAddr, frame []byte) ([]byte, string, bool) {
+func serverResume(conn net.PacketConn, clientAddr net.Addr, frame []byte) ([]byte, string, bool) {
 	if len(frame) < 65 || frame[0] != frameResume {
 		return nil, "", false
 	}
@@ -110,7 +110,7 @@ func serverResume(conn *net.UDPConn, clientAddr *net.UDPAddr, frame []byte) ([]b
 		if hmac.Equal(clientMAC, mac.Sum(nil)[:32]) {
 			// 发确认
 			ack := []byte{frameResume}
-			conn.WriteToUDP(ack, clientAddr)
+			conn.WriteTo(ack, clientAddr)
 			return key, sessionID, true
 		}
 	}

@@ -121,7 +121,7 @@ func (l *Listener) Accept() (*Conn, error) {
 
 	// 0-RTT快速重连
 	if n > 0 && buf[0] == frameResume {
-		if key, sid, ok := serverResume(l.udpConn, clientAddr, buf[:n]); ok {
+		if key, sid, ok := serverResume(dc, clientAddr, buf[:n]); ok {
 			dtlsConn, _ := NewNDTLS(dc, clientAddr, key, l.cfg)
 			conn := &Conn{cfg: l.cfg, dtls: dtlsConn, fec: NewFECCodec(l.cfg.FECData, l.cfg.FECParity),
 				cc: NewCongestionController(l.cfg.MaxBandwidthMbps*1000000/8),
