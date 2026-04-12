@@ -76,7 +76,7 @@ func runTest(cfg *nrup.Config, count int) (sent, recv int, avgLat time.Duration)
 		conn.Write([]byte(fmt.Sprintf("test-packet-%04d", i)))
 		time.Sleep(10 * time.Millisecond)
 	}
-	time.Sleep(500 * time.Millisecond) // 等FEC/ARQ恢复
+	time.Sleep(1500 * time.Millisecond) // 等FEC/ARQ恢复
 
 	sent = count
 	recv = int(serverRecv.Load())
