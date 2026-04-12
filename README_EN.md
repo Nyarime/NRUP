@@ -10,19 +10,31 @@ Reliable encrypted UDP transport protocol based on nDTLS. Achieves zero-latency 
 ## Installation
 
 ```bash
-go get github.com/nyarime/nrup@v1.1.0
+go get github.com/nyarime/nrup@v1.2.0
 ```
 
 Requires Go 1.22+.
 
-## Overview
+## Architecture
 
-NRUP builds a complete reliable transport mechanism on top of UDP while preserving UDP's low-latency characteristics. Supports AnyConnect-compatible DTLS and QUIC wire formats, indistinguishable from standard protocol traffic.
-
-- **Zero-latency loss recovery**: FEC instant recovery + ARQ retransmission fallback
-- **Adaptive**: BBR congestion control + RTT-aware FEC redundancy
-- **Traffic disguise**: AnyConnect DTLS / QUIC dual mode
-- **Cross-platform**: Pure Go, supports x86 / ARM / MIPS
+```
+Application
+  ↓ Write(data)
+Session (connection management, migration, 0-RTT resume)
+  ↓
+Reliability ─┬─ FEC (Reed-Solomon, instant recovery)
+             ├─ ARQ (selective retransmit, timeout fallback)
+             └─ Small packet redundancy (<256B, dynamic 2-3x)
+  ↓
+Congestion (BBR: Pacing + CWND + ProbeRTT)
+  ↓
+Encryption (nDTLS: AES-GCM / ChaCha20, X25519 handshake)
+  ↓
+Disguise ─┬─ AnyConnect DTLS (default)
+          └─ QUIC v1 (Config.Disguise="quic")
+  ↓
+UDP
+```
 
 ## Weak Network Performance
 
@@ -33,43 +45,20 @@ NRUP builds a complete reliable transport mechanism on top of UDP while preservi
 | 5% loss + 100ms | 100% | ✅ FEC recovery |
 | 10% loss + 100ms | 100% | ✅ FEC + ARQ |
 | 20% loss + 200ms | 90% | ✅ Redundant send |
-| 30% loss + 200ms | 93% | ✅ Small packet redundancy |
-
-Tested with tc netem, 30 connections per scenario.
+| 30% loss + 200ms | 93% | ✅ Dynamic redundancy |
 
 ### Extreme Packet Loss
 
 | Scenario | Handshake | Best Delivery |
 |----------|-----------|---------------|
-| 40% loss + 200ms | 67% | 93% |
-| 50% loss + 300ms | 67% | 73% |
-| 60% loss + 300ms | 33% | 67% |
-| 70% loss + 500ms | 33% | 50% |
+| 40% loss + 200ms | 100% | 87% |
+| 50% loss + 300ms | 100% | 77% |
+| 60% loss + 300ms | 33% | 70% |
+| 70% loss + 500ms | 100% | 63% |
 
-## vs TCP / KCP / QUIC
+Tested with tc netem, 30 connections per scenario.
 
-|          | TCP    | KCP     | QUIC    | NRUP    |
-|----------|--------|---------|---------|---------|
-| Transport | TCP   | UDP     | UDP     | UDP     |
-| Encryption | TLS  | None    | TLS 1.3 | nDTLS  |
-| Loss Recovery | Retransmit | Retransmit | Retransmit | FEC+ARQ |
-| Congestion | CUBIC | Custom  | BBR     | BBR     |
-| HOL Blocking | Yes | No     | Partial | No      |
-| Migration | No    | No      | Yes     | Yes     |
-| Disguise | None   | None    | None    | AnyConnect/QUIC |
-
-## Performance
-
-| Metric | Value |
-|--------|-------|
-| nDTLS throughput | 108,496 pps |
-| End-to-end | 4,089 pps |
-| FEC encode | 187 MB/s |
-| AES-256-GCM | 330 MB/s |
-| ChaCha20 | 379 MB/s |
-| BBR | 60ns/op, 0 allocs |
-
-## Usage
+## Quick Start
 
 ```go
 import "github.com/nyarime/nrup"
@@ -89,33 +78,60 @@ defer conn.Close()
 
 conn.Write([]byte("hello"))
 n, _ := conn.Read(buf)
-
-// Metrics
-metrics := conn.GetMetrics()
 ```
+
+## 0-RTT Session Resumption
+
+Cache session after first handshake, skip full handshake on reconnect:
+
+```go
+// First connection
+conn, _ := nrup.Dial(addr, nrup.DefaultConfig())
+sessionID := conn.SessionID() // save this
+conn.Close()
+
+// Subsequent connection (0-RTT)
+cfg := nrup.DefaultConfig()
+cfg.ResumeID = sessionID
+conn, _ = nrup.Dial(addr, cfg) // skips full handshake
+```
+
+Cache valid for 24 hours. HMAC anti-replay. Auto-fallback to full handshake on expiry.
 
 ## Configuration
 
 ```go
 cfg := &nrup.Config{
-    FECData:          8,                  // Data shards
-    FECParity:        4,                  // Parity shards
-    MaxBandwidthMbps: 100,                // BBR initial reference
-    Cipher:           nrup.CipherAuto,    // Auto-detect
-    Disguise:         "anyconnect",       // "anyconnect" / "quic"
-    DisguiseSNI:      "example.com",      // SNI for QUIC mode
+    FECData:              8,                 // Data shards
+    FECParity:            4,                 // Parity shards
+    MaxBandwidthMbps:     100,               // BBR initial reference
+    Cipher:               nrup.CipherAuto,   // Auto-detect
+    Disguise:             "anyconnect",      // "anyconnect" / "quic"
+    DisguiseSNI:          "example.com",     // SNI for QUIC mode
+    SmallPacketThreshold: 256,               // Small packet redundancy threshold
+}
+```
+
+## Authentication
+
+```go
+// PSK (default)
+cfg := nrup.DefaultConfig()
+
+// Ed25519 public key
+cfg := &nrup.Config{
+    AuthMode:      "ed25519",
+    PrivateKey:    privKey,
+    PeerPublicKey: peerPub,
 }
 ```
 
 ## Disguise Modes
 
-### AnyConnect DTLS (default)
-
-Handshake mimics Cisco AnyConnect VPN. Optional certificate embedding via `Config.CertDER`.
-
-### QUIC
-
-QUIC v1 Initial packet format with SNI. Short Header for data frames.
+| Mode | Description |
+|------|-------------|
+| AnyConnect DTLS (default) | Cisco AnyConnect cipher suites, optional cert embedding |
+| QUIC | QUIC v1 Initial + Short Header with SNI |
 
 ## API
 
@@ -125,27 +141,48 @@ QUIC v1 Initial packet format with SNI. Short Header for data frames.
 | `nrup.Listen(addr, cfg)` | Listen on address |
 | `listener.Accept()` | Accept connection |
 | `conn.Read(buf)` | Receive data |
-| `conn.Write(data)` | Send data |
+| `conn.Write(data)` | Send data (auto small-packet redundancy) |
 | `conn.GetMetrics()` | Connection metrics |
+| `conn.Close()` | Close connection |
+| `conn.CloseGraceful()` | Graceful close (notify peer) |
+| `conn.SessionID()` | Session ID (for 0-RTT) |
 | `conn.Migrate(addr)` | Connection migration |
-| `conn.SessionID()` | Session identifier |
 | `nrup.NewMux(conn)` | Stream multiplexer |
+
+## Performance
+
+| Metric | Value |
+|--------|-------|
+| nDTLS throughput | 108,496 pps |
+| End-to-end | 4,089 pps |
+| FEC encode | 187 MB/s |
+| AES-256-GCM | 330 MB/s |
+| ChaCha20 | 379 MB/s |
+| BBR | 60ns/op, 0 allocs |
 
 ## Security
 
 | Threat | Mitigation |
 |--------|-----------|
-| MITM | PSK + HMAC mutual auth |
-| Replay | 64-bit sliding window |
+| MITM | PSK + HMAC / Ed25519 mutual auth |
+| Replay | 64-bit sliding window + 0-RTT HMAC |
 | Key compromise | X25519 forward secrecy |
 | Traffic analysis | AnyConnect / QUIC disguise |
 | Key derivation | HKDF (RFC 5869) |
 | DoS | HelloVerifyRequest Cookie |
 
-### Known Limitations
+## vs TCP / KCP / QUIC
 
-- Ed25519 auth pending integration
-- Handshake reliability in 20%+ loss still improving
+|          | TCP    | KCP     | QUIC    | NRUP    |
+|----------|--------|---------|---------|---------|
+| Transport | TCP   | UDP     | UDP     | UDP     |
+| Encryption | TLS  | None    | TLS 1.3 | nDTLS  |
+| Loss Recovery | Retransmit | Retransmit | Retransmit | FEC+ARQ |
+| Congestion | CUBIC | Custom  | BBR     | BBR     |
+| HOL Blocking | Yes | No     | Partial | No      |
+| Migration | No    | No      | Yes     | Yes     |
+| 0-RTT | No     | No      | Yes     | Yes     |
+| Disguise | None   | None    | None    | AnyConnect/QUIC |
 
 ## License
 
