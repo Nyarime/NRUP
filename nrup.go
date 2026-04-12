@@ -21,7 +21,8 @@ type Config struct {
 	AuthMode     string // "psk"(默认) 或 "ed25519"
 	PrivateKey   []byte // Ed25519私钥(64字节)
 	PeerPublicKey []byte // 对方Ed25519公钥(32字节)
-	CertDER       []byte // TLS证书DER格式(嵌入DTLS ServerHello，伪装用)
+	CertDER       []byte // TLS证书DER格式(嵌入DTLS ServerHello)
+	Disguise      string // 伪装模式: "anyconnect"(默认) / "quic"
 
 	HandshakeTimeout time.Duration
 	IdleTimeout      time.Duration

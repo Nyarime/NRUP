@@ -241,3 +241,26 @@ func TestCertDisguise(t *testing.T) {
 	conn.Write([]byte("with-cert"))
 	t.Logf("✅ Cert disguise: connected (cert CN=vpn.example.com, %d bytes DER)", len(certDER))
 }
+
+func TestQUICDisguise(t *testing.T) {
+	cfg := &Config{FECData: 2, FECParity: 1, Disguise: "quic"}
+
+	listener, err := Listen(":0", cfg)
+	if err != nil { t.Fatal(err) }
+	defer listener.Close()
+
+	go func() {
+		conn, _ := listener.Accept()
+		if conn != nil {
+			t.Logf("Server: QUIC disguise session %s", conn.SessionID()[:8])
+			conn.Close()
+		}
+	}()
+
+	conn, err := Dial(listener.Addr().String(), cfg)
+	if err != nil { t.Fatal("QUIC disguise dial failed:", err) }
+	defer conn.Close()
+
+	conn.Write([]byte("quic-disguised"))
+	t.Logf("✅ QUIC disguise: connected (session: %s)", conn.SessionID()[:8])
+}

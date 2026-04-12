@@ -40,10 +40,15 @@ func clientHandshake(conn *net.UDPConn, serverAddr *net.UDPAddr, cfg *Config) ([
 	}
 	curve25519.ScalarBaseMult(&clientPublic, &clientPrivate)
 
-	// ClientHello (AnyConnect风格)
+	// ClientHello
 	clientRandom := make([]byte, 32)
 	rand.Read(clientRandom)
-	hello := buildAnyConnectClientHello(clientRandom, clientPublic[:])
+	var hello []byte
+	if cfg.Disguise == "quic" {
+		hello = buildQUICInitial(clientRandom, clientPublic[:], true)
+	} else {
+		hello = buildAnyConnectClientHello(clientRandom, clientPublic[:])
+	}
 	conn.WriteToUDP(hello, serverAddr)
 
 	// 读响应（可能是HelloVerifyRequest或ServerHello）
@@ -65,17 +70,25 @@ func clientHandshake(conn *net.UDPConn, serverAddr *net.UDPAddr, cfg *Config) ([
 		}
 	}
 
-	serverRandom, serverPublic, err := parseServerHello(buf[:n])
-	if err != nil {
-		return nil, err
+	var serverRandom, serverPublic []byte
+	var err2 error
+	if cfg.Disguise == "quic" {
+		serverRandom, serverPublic, err2 = parseQUICInitial(buf[:n])
+	} else {
+		serverRandom, serverPublic, err2 = parseServerHello(buf[:n])
+	}
+	if err2 != nil {
+		return nil, err2
 	}
 
-	// 跳过Certificate消息（服务端配了证书时会发）
-	conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
-	if cn, _, cerr := conn.ReadFromUDP(buf); cerr == nil && cn > 13 && buf[0] == 22 && cn > 25 && buf[13] == 11 {
-		// Certificate消息，忽略（仅用于DPI伪装）
+	// 跳过Certificate消息（AnyConnect模式且服务端配了证书时会发）
+	if cfg.Disguise != "quic" {
+		conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+		if cn, _, cerr := conn.ReadFromUDP(buf); cerr == nil && cn > 13 && buf[0] == 22 && cn > 25 && buf[13] == 11 {
+			// Certificate消息，忽略
+		}
+		conn.SetReadDeadline(time.Time{})
 	}
-	conn.SetReadDeadline(time.Time{})
 
 	// X25519共享密钥
 	var sharedSecret, serverPub [32]byte
@@ -122,7 +135,13 @@ func clientHandshake(conn *net.UDPConn, serverAddr *net.UDPAddr, cfg *Config) ([
 
 // serverHandshake 服务端握手
 func serverHandshake(conn *net.UDPConn, clientAddr *net.UDPAddr, firstPacket []byte, cfg *Config) ([]byte, error) {
-	clientRandom, clientPublic, err := parseClientHello(firstPacket)
+	var clientRandom, clientPublic []byte
+	var err error
+	if cfg.Disguise == "quic" {
+		clientRandom, clientPublic, err = parseQUICInitial(firstPacket)
+	} else {
+		clientRandom, clientPublic, err = parseClientHello(firstPacket)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -135,11 +154,16 @@ func serverHandshake(conn *net.UDPConn, clientAddr *net.UDPAddr, firstPacket []b
 
 	serverRandom := make([]byte, 32)
 	rand.Read(serverRandom)
-	hello := buildAnyConnectServerHello(serverRandom, serverPublic[:])
+	var hello []byte
+	if cfg.Disguise == "quic" {
+		hello = buildQUICInitial(serverRandom, serverPublic[:], false)
+	} else {
+		hello = buildAnyConnectServerHello(serverRandom, serverPublic[:])
+	}
 	conn.WriteToUDP(hello, clientAddr)
 
-	// 发送Certificate消息（AnyConnect伪装，DPI看到和TCP端口同一张证书）
-	if len(cfg.CertDER) > 0 {
+	// 发送Certificate消息（AnyConnect伪装，QUIC模式跳过）
+	if cfg.Disguise != "quic" && len(cfg.CertDER) > 0 {
 		certMsg := buildDTLSCertificate(cfg.CertDER)
 		conn.WriteToUDP(certMsg, clientAddr)
 	}
