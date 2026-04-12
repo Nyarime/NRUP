@@ -76,7 +76,7 @@ func TestAdaptiveFEC(t *testing.T) {
 	afec.RecordLoss(1) // 1% loss
 	d, p := afec.Adjust()
 	t.Logf("1%% loss → %d:%d", d, p)
-	if p > 2 {
+	if p > 4 {
 		t.Errorf("expected low parity for 1%% loss, got %d", p)
 	}
 

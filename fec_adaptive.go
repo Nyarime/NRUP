@@ -74,16 +74,16 @@ func (a *AdaptiveFEC) Adjust() (data, parity int) {
 
 	// 根据丢包率调整
 	switch {
-	case lossRate < 0.01: // <1% 几乎无丢包
-		a.ParityShards = a.MinParity // 最小冗余，省带宽
+	case lossRate < 0.01: // <1%
+		a.ParityShards = a.MinParity
 	case lossRate < 0.05: // 1-5%
-		a.ParityShards = 2
-	case lossRate < 0.10: // 5-10%
 		a.ParityShards = int(float64(3) * rttFactor)
-	case lossRate < 0.20: // 10-20%
+	case lossRate < 0.10: // 5-10%
 		a.ParityShards = int(float64(5) * rttFactor)
+	case lossRate < 0.20: // 10-20%
+		a.ParityShards = int(float64(7) * rttFactor)
 	case lossRate < 0.30: // 20-30%
-		a.ParityShards = 7
+		a.ParityShards = int(float64(9) * rttFactor)
 	default: // >30%
 		a.ParityShards = a.MaxParity
 	}

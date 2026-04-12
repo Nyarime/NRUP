@@ -38,8 +38,17 @@ func Dial(addr string, cfg *Config) (*Conn, error) {
 		}
 	}
 
-	// X25519握手，派生密钥
-	key, err := clientHandshake(udpConn, rAddr, cfg)
+	// X25519握手（最多重试3次）
+	var key []byte
+	for attempt := 0; attempt < 3; attempt++ {
+		key, err = clientHandshake(udpConn, rAddr, cfg)
+		if err == nil {
+			break
+		}
+		if attempt < 2 {
+			time.Sleep(time.Duration(100*(attempt+1)) * time.Millisecond)
+		}
+	}
 	if err != nil {
 		udpConn.Close()
 		return nil, err

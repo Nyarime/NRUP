@@ -32,8 +32,8 @@ type Config struct {
 
 func DefaultConfig() *Config {
 	return &Config{
-		FECData:          10,
-		FECParity:        3,
+		FECData:          8,
+		FECParity:        4,
 		HandshakeTimeout: 10 * time.Second,
 		IdleTimeout:      120 * time.Second,
 	}
