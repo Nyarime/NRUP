@@ -1,7 +1,13 @@
 package nrup
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"fmt"
+	"math/big"
 	"sync"
 	"testing"
 	"time"
@@ -203,4 +209,35 @@ func TestZeroRTT(t *testing.T) {
 	}
 	conn2.Write([]byte("resumed"))
 	conn2.Close()
+}
+
+func TestCertDisguise(t *testing.T) {
+	// 生成自签名证书DER
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "vpn.example.com"},
+		NotBefore:    time.Now(),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+	}
+	certDER, _ := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+
+	serverCfg := &Config{FECData: 2, FECParity: 1, CertDER: certDER}
+	clientCfg := &Config{FECData: 2, FECParity: 1}
+
+	listener, err := Listen(":0", serverCfg)
+	if err != nil { t.Fatal(err) }
+	defer listener.Close()
+
+	go func() {
+		conn, _ := listener.Accept()
+		if conn != nil { conn.Close() }
+	}()
+
+	conn, err := Dial(listener.Addr().String(), clientCfg)
+	if err != nil { t.Fatal("Cert disguise dial failed:", err) }
+	defer conn.Close()
+
+	conn.Write([]byte("with-cert"))
+	t.Logf("✅ Cert disguise: connected (cert CN=vpn.example.com, %d bytes DER)", len(certDER))
 }

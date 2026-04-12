@@ -70,6 +70,13 @@ func clientHandshake(conn *net.UDPConn, serverAddr *net.UDPAddr, cfg *Config) ([
 		return nil, err
 	}
 
+	// 跳过Certificate消息（服务端配了证书时会发）
+	conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	if cn, _, cerr := conn.ReadFromUDP(buf); cerr == nil && cn > 13 && buf[0] == 22 && cn > 25 && buf[13] == 11 {
+		// Certificate消息，忽略（仅用于DPI伪装）
+	}
+	conn.SetReadDeadline(time.Time{})
+
 	// X25519共享密钥
 	var sharedSecret, serverPub [32]byte
 	copy(serverPub[:], serverPublic)
@@ -130,6 +137,12 @@ func serverHandshake(conn *net.UDPConn, clientAddr *net.UDPAddr, firstPacket []b
 	rand.Read(serverRandom)
 	hello := buildAnyConnectServerHello(serverRandom, serverPublic[:])
 	conn.WriteToUDP(hello, clientAddr)
+
+	// 发送Certificate消息（AnyConnect伪装，DPI看到和TCP端口同一张证书）
+	if len(cfg.CertDER) > 0 {
+		certMsg := buildDTLSCertificate(cfg.CertDER)
+		conn.WriteToUDP(certMsg, clientAddr)
+	}
 
 	var sharedSecret, clientPub [32]byte
 	copy(clientPub[:], clientPublic)
@@ -390,4 +403,42 @@ func signHandshake(privKey, sharedSecret, clientRandom, serverRandom []byte) []b
 func verifyHandshakeSignature(pubKey, sig, sharedSecret, clientRandom, serverRandom []byte) bool {
 	msg := append(append(append([]byte{}, sharedSecret...), clientRandom...), serverRandom...)
 	return ed25519.Verify(pubKey, msg, sig)
+}
+
+// buildDTLSCertificate 构造DTLS Certificate消息
+// 格式完全模拟AnyConnect ASA设备的证书交换
+func buildDTLSCertificate(certDER []byte) []byte {
+	certLen := len(certDER)
+
+	// Handshake body: certificates_length(3) + cert_length(3) + cert
+	body := make([]byte, 0, 6+certLen)
+	// certificates list length (3 bytes)
+	totalLen := 3 + certLen
+	body = append(body, byte(totalLen>>16), byte(totalLen>>8), byte(totalLen))
+	// single certificate length (3 bytes)
+	body = append(body, byte(certLen>>16), byte(certLen>>8), byte(certLen))
+	// certificate DER data
+	body = append(body, certDER...)
+
+	// Handshake header: type(1) + length(3) + seq(2) + frag_offset(3) + frag_length(3)
+	hsType := byte(11) // Certificate
+	hsLen := len(body)
+	hs := make([]byte, 0, 12+hsLen)
+	hs = append(hs, hsType)
+	hs = append(hs, byte(hsLen>>16), byte(hsLen>>8), byte(hsLen))
+	hs = append(hs, 0, 1) // message_seq = 1 (ServerHello=0, Certificate=1)
+	hs = append(hs, 0, 0, 0) // fragment_offset = 0
+	hs = append(hs, byte(hsLen>>16), byte(hsLen>>8), byte(hsLen)) // fragment_length
+	hs = append(hs, body...)
+
+	// DTLS record header
+	record := make([]byte, 0, 13+len(hs))
+	record = append(record, 22) // ContentType: Handshake
+	record = append(record, 0xFE, 0xFD) // DTLS 1.2
+	record = append(record, 0, 0) // epoch
+	record = append(record, 0, 0, 0, 0, 0, 2) // sequence_number = 2
+	record = append(record, byte(len(hs)>>8), byte(len(hs))) // length
+	record = append(record, hs...)
+
+	return record
 }
