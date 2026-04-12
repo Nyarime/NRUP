@@ -132,14 +132,27 @@ func (l *Listener) Accept() (*Conn, error) {
 		}
 	}
 
-	// Cookie防DoS
+	// Cookie防DoS（重试3次，指数退避）
 	if len(l.cookieSecret) > 0 {
 		cookie := generateCookie(clientAddr, l.cookieSecret)
 		hvr := buildHelloVerifyRequest(cookie)
 		l.udpConn.WriteToUDP(hvr, clientAddr)
-		n2, _, err := dc.ReadFrom(buf)
-		if err != nil { return nil, err }
-		n = n2
+		var cookieErr error
+		for retry := 0; retry < 3; retry++ {
+			timeout := 300 * time.Millisecond * time.Duration(1<<retry)
+			dc.SetReadDeadline(time.Now().Add(timeout))
+			n2, _, err := dc.ReadFrom(buf)
+			if err == nil {
+				n = n2
+				cookieErr = nil
+				break
+			}
+			cookieErr = err
+			// 重发HVR
+			l.udpConn.WriteToUDP(hvr, clientAddr)
+		}
+		dc.SetReadDeadline(time.Time{})
+		if cookieErr != nil { return nil, cookieErr }
 	}
 
 	// X25519握手

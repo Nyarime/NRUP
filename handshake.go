@@ -61,12 +61,19 @@ func clientHandshake(conn *net.UDPConn, serverAddr *net.UDPAddr, cfg *Config) ([
 
 	// 检查是否是HelloVerifyRequest（handshake type 0x03）
 	if n > 13 && buf[0] == 22 && buf[13] == 0x03 {
-		// 收到Cookie挑战，重发ClientHello
-		conn.WriteToUDP(hello, serverAddr)
-		// 等真正的ServerHello
-		n, _, err = conn.ReadFromUDP(buf)
-		if err != nil {
-			return nil, fmt.Errorf("handshake timeout after cookie: %w", err)
+		// 收到Cookie挑战，重发ClientHello（重试3次，指数退避）
+		var serverErr error
+		for retry := 0; retry < 3; retry++ {
+			conn.WriteToUDP(hello, serverAddr)
+			timeout := 500 * time.Millisecond * time.Duration(1<<retry)
+			conn.SetReadDeadline(time.Now().Add(timeout))
+			n, _, serverErr = conn.ReadFromUDP(buf)
+			if serverErr == nil {
+				break
+			}
+		}
+		if serverErr != nil {
+			return nil, fmt.Errorf("handshake timeout after cookie: %w", serverErr)
 		}
 	}
 
