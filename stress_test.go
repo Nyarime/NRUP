@@ -264,3 +264,23 @@ func TestQUICDisguise(t *testing.T) {
 	conn.Write([]byte("quic-disguised"))
 	t.Logf("✅ QUIC disguise: connected (session: %s)", conn.SessionID()[:8])
 }
+
+func TestQUICDisguiseWithSNI(t *testing.T) {
+	cfg := &Config{FECData: 2, FECParity: 1, Disguise: "quic", DisguiseSNI: "www.apple.com"}
+
+	listener, err := Listen(":0", cfg)
+	if err != nil { t.Fatal(err) }
+	defer listener.Close()
+
+	go func() {
+		conn, _ := listener.Accept()
+		if conn != nil { conn.Close() }
+	}()
+
+	conn, err := Dial(listener.Addr().String(), cfg)
+	if err != nil { t.Fatal("QUIC+SNI dial failed:", err) }
+	defer conn.Close()
+
+	conn.Write([]byte("quic-with-sni"))
+	t.Logf("✅ QUIC+SNI disguise: connected (SNI=www.apple.com)")
+}

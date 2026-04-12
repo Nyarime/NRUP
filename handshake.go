@@ -45,7 +45,7 @@ func clientHandshake(conn *net.UDPConn, serverAddr *net.UDPAddr, cfg *Config) ([
 	rand.Read(clientRandom)
 	var hello []byte
 	if cfg.Disguise == "quic" {
-		hello = buildQUICInitial(clientRandom, clientPublic[:], true)
+		hello = buildQUICInitial(clientRandom, clientPublic[:], true, cfg.DisguiseSNI)
 	} else {
 		hello = buildAnyConnectClientHello(clientRandom, clientPublic[:])
 	}
@@ -156,7 +156,7 @@ func serverHandshake(conn *net.UDPConn, clientAddr *net.UDPAddr, firstPacket []b
 	rand.Read(serverRandom)
 	var hello []byte
 	if cfg.Disguise == "quic" {
-		hello = buildQUICInitial(serverRandom, serverPublic[:], false)
+		hello = buildQUICInitial(serverRandom, serverPublic[:], false, cfg.DisguiseSNI)
 	} else {
 		hello = buildAnyConnectServerHello(serverRandom, serverPublic[:])
 	}

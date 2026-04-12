@@ -23,6 +23,7 @@ type Config struct {
 	PeerPublicKey []byte // 对方Ed25519公钥(32字节)
 	CertDER       []byte // TLS证书DER格式(嵌入DTLS ServerHello)
 	Disguise      string // 伪装模式: "anyconnect"(默认) / "quic"
+	DisguiseSNI   string // QUIC伪装时嵌入的SNI(防GFW QUIC审查)
 
 	HandshakeTimeout time.Duration
 	IdleTimeout      time.Duration

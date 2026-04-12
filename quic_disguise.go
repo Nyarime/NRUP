@@ -14,7 +14,7 @@ const (
 
 // buildQUICInitial 构造QUIC Initial包格式
 // 把X25519公钥嵌入DCID/SCID字段
-func buildQUICInitial(random, pubkey []byte, isClient bool) []byte {
+func buildQUICInitial(random, pubkey []byte, isClient bool, sni ...string) []byte {
 	pkt := make([]byte, 0, 128+len(pubkey))
 
 	// Header Form (1) + Fixed Bit (1) + Packet Type (2) + Reserved (2) + PN Length (2)
@@ -56,15 +56,34 @@ func buildQUICInitial(random, pubkey []byte, isClient bool) []byte {
 	payload := make([]byte, 0, 64+len(pubkey))
 	// Packet Number (4 bytes)
 	payload = append(payload, 0x00, 0x00, 0x00, 0x00)
-	// CRYPTO frame: type(1) + offset(1) + length(2) + data
+	// CRYPTO frame: 嵌入TLS ClientHello (含SNI extension)
 	payload = append(payload, 0x06) // CRYPTO frame type
 	payload = append(payload, 0x00) // offset = 0
-	dataLen := 32 + len(pubkey) // random(剩余16B) + pubkey
-	payload = append(payload, byte(dataLen>>8), byte(dataLen))
+
+	// 构建ClientHello数据
+	chData := make([]byte, 0, 128)
+	// random剩余部分
 	if len(random) > 16 {
-		payload = append(payload, random[16:]...)
+		chData = append(chData, random[16:]...)
 	}
-	payload = append(payload, pubkey...)
+	// pubkey
+	chData = append(chData, pubkey...)
+	// SNI extension (type 0x0000)
+	if len(sni) > 0 && sni[0] != "" {
+		sniBytes := []byte(sni[0])
+		// Extension: server_name (0x0000)
+		chData = append(chData, 0x00, 0x00) // extension type
+		sniListLen := 2 + 1 + 2 + len(sniBytes) // list_len + type + name_len + name
+		chData = append(chData, byte(sniListLen>>8), byte(sniListLen)) // extension length
+		chData = append(chData, byte((sniListLen-2)>>8), byte(sniListLen-2)) // server_name_list length
+		chData = append(chData, 0x00) // host_name type
+		chData = append(chData, byte(len(sniBytes)>>8), byte(len(sniBytes))) // name length
+		chData = append(chData, sniBytes...) // hostname
+	}
+
+	dataLen := len(chData)
+	payload = append(payload, byte(dataLen>>8), byte(dataLen))
+	payload = append(payload, chData...)
 	// Padding to minimum 1200 bytes? No - keep it small for UDP
 	// 加一些随机padding让长度更自然
 	padLen := 32
