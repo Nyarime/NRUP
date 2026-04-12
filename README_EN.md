@@ -1,8 +1,19 @@
 # NRUP
 
+[![CI](https://github.com/Nyarime/NRUP/actions/workflows/ci.yml/badge.svg)](https://github.com/Nyarime/NRUP/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/nyarime/nrup.svg)](https://pkg.go.dev/github.com/nyarime/nrup)
+
 Reliable encrypted UDP transport protocol based on nDTLS. Achieves zero-latency recovery through FEC forward error correction, with ARQ selective retransmission as fallback. Designed for high-loss, high-latency cross-border links.
 
 [中文](README.md)
+
+## Installation
+
+```bash
+go get github.com/nyarime/nrup@v1.1.0
+```
+
+Requires Go 1.22+.
 
 ## Overview
 
@@ -25,6 +36,15 @@ NRUP builds a complete reliable transport mechanism on top of UDP while preservi
 | 30% loss + 200ms | 93% | ✅ Small packet redundancy |
 
 Tested with tc netem, 30 connections per scenario.
+
+### Extreme Packet Loss
+
+| Scenario | Handshake | Best Delivery |
+|----------|-----------|---------------|
+| 40% loss + 200ms | 67% | 93% |
+| 50% loss + 300ms | 67% | 73% |
+| 60% loss + 300ms | 33% | 67% |
+| 70% loss + 500ms | 33% | 50% |
 
 ## vs TCP / KCP / QUIC
 

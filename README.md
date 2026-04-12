@@ -1,8 +1,19 @@
 # NRUP
 
+[![CI](https://github.com/Nyarime/NRUP/actions/workflows/ci.yml/badge.svg)](https://github.com/Nyarime/NRUP/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/nyarime/nrup.svg)](https://pkg.go.dev/github.com/nyarime/nrup)
+
 基于 nDTLS 的可靠加密 UDP 传输协议。通过 FEC 前向纠错与 ARQ 选择性重传的双重机制，在丢包时实现零延迟恢复，极端情况下通过重传保证可靠交付。为高丢包、高延迟的跨国链路和受限网络环境设计。
 
 [English](README_EN.md)
+
+## 安装
+
+```bash
+go get github.com/nyarime/nrup@v1.1.0
+```
+
+要求 Go 1.22+。
 
 ## 概述
 
@@ -47,6 +58,15 @@ UDP
 | 30% 丢包 + 200ms | 93% | ✅ 小包冗余 |
 
 测试环境：tc netem 模拟，30 次连接。
+
+### 极端丢包
+
+| 场景 | 握手成功率 | 最佳送达率 |
+|------|----------|----------|
+| 40% 丢包 + 200ms | 67% | 93% |
+| 50% 丢包 + 300ms | 67% | 73% |
+| 60% 丢包 + 300ms | 33% | 67% |
+| 70% 丢包 + 500ms | 33% | 50% |
 
 ## 与 TCP / KCP / QUIC 的区别
 
@@ -110,6 +130,20 @@ cfg := &nrup.Config{
 ```
 
 ## 伪装模式
+
+### 认证模式
+
+```go
+// PSK（默认）
+cfg := nrup.DefaultConfig()
+
+// Ed25519 公钥签名
+cfg := &nrup.Config{
+    AuthMode:      "ed25519",
+    PrivateKey:    privKey,
+    PeerPublicKey: peerPub,
+}
+```
 
 ### AnyConnect DTLS（默认）
 
