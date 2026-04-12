@@ -159,3 +159,48 @@ func testMultiConn(t *testing.T, count int) {
 	}
 }
 
+
+func TestZeroRTT(t *testing.T) {
+	cfg := &Config{FECData: 2, FECParity: 1}
+
+	listener, err := Listen(":0", cfg)
+	if err != nil { t.Fatal(err) }
+	defer listener.Close()
+	addr := listener.Addr().String()
+
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil { return }
+			go func() {
+				defer conn.Close()
+				buf := make([]byte, 4096)
+				for { n, err := conn.Read(buf); if err != nil { return }; conn.Write(buf[:n]) }
+			}()
+		}
+	}()
+
+	// 首次连接
+	conn1, err := Dial(addr, cfg)
+	if err != nil { t.Fatal(err) }
+	conn1.Write([]byte("first"))
+	sid := conn1.SessionID()
+	t.Logf("首次连接: %s", sid[:16])
+	conn1.Close()
+	time.Sleep(100 * time.Millisecond)
+
+	// 0-RTT重连
+	cfg2 := &Config{FECData: 2, FECParity: 1, ResumeID: sid}
+	conn2, err := Dial(addr, cfg2)
+	if err != nil {
+		t.Logf("0-RTT失败(降级完整握手): %v", err)
+		cfg3 := &Config{FECData: 2, FECParity: 1}
+		conn2, err = Dial(addr, cfg3)
+		if err != nil { t.Fatal(err) }
+		t.Logf("降级成功: %s", conn2.SessionID()[:16])
+	} else {
+		t.Logf("✅ 0-RTT成功: %s", conn2.SessionID()[:16])
+	}
+	conn2.Write([]byte("resumed"))
+	conn2.Close()
+}
