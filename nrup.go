@@ -86,10 +86,11 @@ func (c *Conn) Write(p []byte) (int, error) {
 	c.retransmit.Add(seq, frames, rto)
 	c.seq.OnSend(seq)
 
-	// 发送所有分片
+	// 发送所有分片（加FrameData前缀）
 	for _, frame := range frames {
-		c.cc.Wait(len(frame))
-		c.dtls.Write(frame)
+		c.cc.Wait(len(frame) + 1)
+		tagged := append([]byte{FrameData}, frame...)
+		c.dtls.Write(tagged)
 	}
 
 	c.bytesSent.Add(int64(len(p)))
@@ -131,13 +132,13 @@ func (c *Conn) Read(p []byte) (int, error) {
 
 			case FrameData:
 				// 数据帧 → 发ACK + FEC解码
-				df := DecodeDataFrame(buf[:n])
+				payload := buf[1:n] // 去掉FrameData前缀
+				df := DecodeDataFrame(payload)
 				if df != nil {
-					// 回ACK
 					ackFrame := EncodeACKFrame(df.Seq, 0)
 					c.dtls.Write(ackFrame)
 				}
-				decoded := c.fec.Decode(buf[:n])
+				decoded := c.fec.Decode(payload)
 				if decoded != nil {
 					c.bytesRecv.Add(int64(len(decoded)))
 					copy(p, decoded)
@@ -147,13 +148,7 @@ func (c *Conn) Read(p []byte) (int, error) {
 			}
 		}
 
-		// 旧格式兼容
-		decoded := c.fec.Decode(buf[:n])
-		if decoded != nil {
-			c.bytesRecv.Add(int64(len(decoded)))
-				copy(p, decoded)
-			return len(decoded), nil
-		}
+		// 未知帧类型，跳过
 	}
 }
 

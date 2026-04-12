@@ -27,6 +27,7 @@ type fecGroup struct {
 	dataLen  int
 	received int
 	created  time.Time
+	decoded  bool // 已解码标记，防止重复返回
 }
 
 func NewFECCodec(data, parity int) *FECCodec {
@@ -104,12 +105,13 @@ func (f *FECCodec) Decode(frame []byte) []byte {
 		group.received++
 	}
 
-	if group.received >= f.dataShards {
+	if group.received >= f.dataShards && !group.decoded {
 		for i := 0; i < total; i++ {
 			if !group.present[i] { group.shards[i] = nil }
 		}
 		err := f.encoder.Reconstruct(group.shards)
 		if err == nil {
+			group.decoded = true
 			delete(f.recvPool, seq)
 			result := make([]byte, 0, group.dataLen)
 			for i := 0; i < f.dataShards; i++ {
