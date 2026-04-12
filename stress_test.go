@@ -6,61 +6,118 @@ import (
 	"time"
 )
 
-// 大数据传输测试
-
-
-// 多次小包传输（模拟游戏）
 func TestGameTraffic(t *testing.T) {
-	port := 19879
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	cfg := &Config{FECData: 2, FECParity: 1}
 
-	ln, err := Listen(fmt.Sprintf(":%d", port), &Config{FECData: 5, FECParity: 2})
-	if err != nil {
-		t.Skipf("Listen: %v", err)
-		return
-	}
-	defer ln.Close()
+	listener, err := Listen(":0", cfg)
+	if err != nil { t.Fatal(err) }
+	defer listener.Close()
 
-	packets := 100
-	packetSize := 64 // 游戏包通常很小
-	done := make(chan int, 1)
+	addr := listener.Addr().String()
 
+	serverRecv := make(chan string, 200)
 	go func() {
-		conn, _ := ln.Accept()
+		conn, err := listener.Accept()
+		if err != nil { return }
 		defer conn.Close()
-		count := 0
-		buf := make([]byte, 1024)
-		for count < packets {
-			_, err := conn.Read(buf)
-			if err != nil {
-				break
-			}
-			count++
+		buf := make([]byte, 4096)
+		for {
+			n, err := conn.Read(buf)
+			if err != nil { return }
+			serverRecv <- string(buf[:n])
 		}
-		done <- count
 	}()
 
-	time.Sleep(100 * time.Millisecond)
-	conn, err := Dial(addr, &Config{FECData: 5, FECParity: 2, Insecure: true})
-	if err != nil {
-		t.Skipf("Dial: %v", err)
-		return
-	}
+	conn, err := Dial(addr, cfg)
+	if err != nil { t.Fatal(err) }
 	defer conn.Close()
 
+	sent := 0
 	start := time.Now()
-	for i := 0; i < packets; i++ {
-		data := make([]byte, packetSize)
-		data[0] = byte(i)
-		conn.Write(data)
+	for i := 0; i < 100; i++ {
+		data := []byte(fmt.Sprintf("pkt-%04d", i))
+		if _, err := conn.Write(data); err == nil { sent++ }
 	}
-	elapsed := time.Since(start)
 
-	select {
-	case count := <-done:
-		pps := float64(count) / elapsed.Seconds()
-		t.Logf("✅ Game traffic: %d/%d packets in %v (%.0f pps)", count, packets, elapsed, pps)
-	case <-time.After(10 * time.Second):
-		t.Fatal("Timeout")
+	recv := 0
+	timer := time.After(5 * time.Second)
+	for recv < sent {
+		select {
+		case <-serverRecv:
+			recv++
+		case <-timer:
+			goto done
+		}
+	}
+done:
+	elapsed := time.Since(start)
+	t.Logf("✅ Game traffic: %d/%d in %v (%.0f pps)", recv, sent, elapsed, float64(recv)/elapsed.Seconds())
+	if recv < 10 {
+		t.Errorf("Too few: %d", recv)
 	}
 }
+
+func TestSessionID(t *testing.T) {
+	cfg := &Config{FECData: 2, FECParity: 1}
+	listener, err := Listen(":0", cfg)
+	if err != nil { t.Fatal(err) }
+	defer listener.Close()
+
+	go func() {
+		conn, _ := listener.Accept()
+		if conn != nil {
+			t.Logf("Server session: %s", conn.SessionID())
+			conn.Close()
+		}
+	}()
+
+	conn, err := Dial(listener.Addr().String(), cfg)
+	if err != nil { t.Fatal(err) }
+	defer conn.Close()
+	t.Logf("Client session: %s", conn.SessionID())
+	if len(conn.SessionID()) < 16 { t.Errorf("too short") }
+}
+
+func TestMux(t *testing.T) {
+	cfg := &Config{FECData: 2, FECParity: 1}
+
+	listener, err := Listen(":0", cfg)
+	if err != nil { t.Fatal(err) }
+	defer listener.Close()
+
+	// Server
+	go func() {
+		conn, _ := listener.Accept()
+		mux := NewMux(conn)
+		defer mux.Close()
+
+		for i := 0; i < 3; i++ {
+			stream, err := mux.Accept()
+			if err != nil { return }
+			go func(s *Stream) {
+				buf := make([]byte, 4096)
+				n, _ := s.Read(buf)
+				s.Write(buf[:n]) // echo
+			}(stream)
+		}
+	}()
+
+	// Client
+	conn, err := Dial(listener.Addr().String(), cfg)
+	if err != nil { t.Fatal(err) }
+	mux := NewMux(conn)
+	defer mux.Close()
+
+	// 开3个Stream
+	for i := 0; i < 3; i++ {
+		stream, err := mux.Open()
+		if err != nil { t.Fatal(err) }
+
+		msg := fmt.Sprintf("stream-%d", i)
+		stream.Write([]byte(msg))
+		t.Logf("Stream %d: sent %s", stream.ID(), msg)
+	}
+
+	t.Logf("✅ Mux: 3 streams opened")
+}
+

@@ -43,6 +43,7 @@ type NDTLSConn struct {
 	retransmit *RetransmitQueue
 	closed     atomic.Bool
 	writeMu    sync.Mutex
+	replay     replayWindow
 }
 
 // NewNDTLS 创建最小DTLS连接
@@ -62,7 +63,7 @@ func NewNDTLS(conn net.PacketConn, remoteAddr net.Addr, key []byte, cfg *Config)
 		aead:       aead,
 		writeEpoch: 1,
 		fec:        NewFECCodec(cfg.FECData, cfg.FECParity),
-		cc:         NewCongestionController(cfg.MaxBandwidth),
+		cc:         NewCongestionController(cfg.MaxBandwidthMbps * 1000000 / 8),
 		seq:        NewSeqTracker(),
 		adaptive:   NewAdaptiveFEC(cfg.FECData, cfg.FECParity),
 		retransmit: NewRetransmitQueue(),
@@ -75,34 +76,37 @@ func (mc *NDTLSConn) Write(p []byte) (int, error) {
 	mc.writeMu.Lock()
 	defer mc.writeMu.Unlock()
 
-	// AES-GCM加密
-	nonce := make([]byte, mc.aead.NonceSize())
+	nonceSize := mc.aead.NonceSize()
+	overhead := mc.aead.Overhead()
+	payloadLen := nonceSize + len(p) + overhead
+	totalLen := recordHeaderLen + payloadLen
+
+	// 单次分配：record header + nonce + ciphertext
+	buf := make([]byte, totalLen)
+
+	// nonce
+	nonce := buf[recordHeaderLen : recordHeaderLen+nonceSize]
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil { return 0, err }
-	encrypted := mc.aead.Seal(nil, nonce, p, nil)
 
-	// 构造DTLS记录
+	// 加密（直接写入buf）
+	mc.aead.Seal(buf[recordHeaderLen+nonceSize:recordHeaderLen+nonceSize], nonce, p, nil)
+
+	// DTLS记录头
 	seqNum := mc.writeSeq.Add(1)
-	payload := append(nonce, encrypted...)
+	buf[0] = contentAppData
+	binary.BigEndian.PutUint16(buf[1:3], dtlsVersion)
+	binary.BigEndian.PutUint16(buf[3:5], mc.writeEpoch)
+	buf[5] = byte(seqNum >> 40)
+	buf[6] = byte(seqNum >> 32)
+	buf[7] = byte(seqNum >> 24)
+	buf[8] = byte(seqNum >> 16)
+	buf[9] = byte(seqNum >> 8)
+	buf[10] = byte(seqNum)
+	binary.BigEndian.PutUint16(buf[11:13], uint16(payloadLen))
 
-	record := make([]byte, recordHeaderLen+len(payload))
-	record[0] = contentAppData                                    // ContentType
-	binary.BigEndian.PutUint16(record[1:3], dtlsVersion)         // Version
-	binary.BigEndian.PutUint16(record[3:5], mc.writeEpoch)       // Epoch
-	// 6-byte sequence number
-	record[5] = byte(seqNum >> 40)
-	record[6] = byte(seqNum >> 32)
-	record[7] = byte(seqNum >> 24)
-	record[8] = byte(seqNum >> 16)
-	record[9] = byte(seqNum >> 8)
-	record[10] = byte(seqNum)
-	binary.BigEndian.PutUint16(record[11:13], uint16(len(payload))) // Length
-	copy(record[13:], payload)
+	mc.cc.Wait(totalLen)
 
-	// 拥塞控制
-	mc.cc.Wait(len(record))
-
-	// 发送
-	_, err := mc.udpConn.WriteTo(record, mc.remoteAddr)
+	_, err := mc.udpConn.WriteTo(buf, mc.remoteAddr)
 	if err != nil {
 		return 0, err
 	}
@@ -124,10 +128,18 @@ func (mc *NDTLSConn) Read(p []byte) (int, error) {
 	// 验证DTLS记录头
 	contentType := buf[0]
 	version := binary.BigEndian.Uint16(buf[1:3])
+	// 提取序列号（48位）
+	recvSeq := uint64(buf[5])<<40 | uint64(buf[6])<<32 | uint64(buf[7])<<24 |
+		uint64(buf[8])<<16 | uint64(buf[9])<<8 | uint64(buf[10])
 	payloadLen := binary.BigEndian.Uint16(buf[11:13])
 
 	if contentType != contentAppData || version != dtlsVersion {
 		return 0, errors.New("invalid DTLS record")
+	}
+
+	// 防重放检查
+	if !mc.replay.Check(recvSeq) {
+		return 0, errors.New("replay detected")
 	}
 
 	if int(payloadLen)+recordHeaderLen > n {
@@ -167,4 +179,50 @@ func (mc *NDTLSConn) SetWriteDeadline(t time.Time) error      { return nil }
 func (mc *NDTLSConn) Overhead() int {
 	return recordHeaderLen + mc.aead.NonceSize() + mc.aead.Overhead()
 	// 13 + 12 + 16 = 41 bytes
+}
+
+// UpdateRemoteAddr 更新远端地址（连接迁移）
+func (mc *NDTLSConn) UpdateRemoteAddr(addr net.Addr) {
+	mc.writeMu.Lock()
+	mc.remoteAddr = addr
+	mc.writeMu.Unlock()
+}
+
+// RemoteAddr 获取远端地址
+func (mc *NDTLSConn) RemoteAddrInfo() net.Addr {
+	return mc.remoteAddr
+}
+
+// replayWindow 防重放窗口（64位bitmap）
+type replayWindow struct {
+	maxSeq uint64
+	bitmap uint64 // 覆盖maxSeq前64个序列号
+}
+
+func (rw *replayWindow) Check(seq uint64) bool {
+	if seq > rw.maxSeq {
+		// 新序列号，滑动窗口
+		shift := seq - rw.maxSeq
+		if shift >= 64 {
+			rw.bitmap = 0
+		} else {
+			rw.bitmap <<= shift
+		}
+		rw.maxSeq = seq
+		rw.bitmap |= 1
+		return true
+	}
+
+	// 旧序列号，检查是否在窗口内
+	diff := rw.maxSeq - seq
+	if diff >= 64 {
+		return false // 太旧，拒绝
+	}
+
+	mask := uint64(1) << diff
+	if rw.bitmap&mask != 0 {
+		return false // 已收过，重放攻击
+	}
+	rw.bitmap |= mask
+	return true
 }

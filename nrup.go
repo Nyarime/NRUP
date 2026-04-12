@@ -11,11 +11,13 @@ import (
 type Config struct {
 	FECData      int
 	FECParity    int
-	MaxBandwidth int64
+	MaxBandwidthMbps int64 // BBR起步参考值(Mbps)，不是限速。BBR会自动探测实际带宽。0=从小窗口慢启动
 	Insecure     bool
 	CertFile     string
 	KeyFile      string
 	Cipher       CipherType // auto/aes-256-gcm/chacha20-poly1305/xchacha20-poly1305
+	PSK          []byte // 预共享密钥（防MITM，可选）
+	ResumeID     string // 上次连接的SessionID（0-RTT恢复用）
 
 	HandshakeTimeout time.Duration
 	IdleTimeout      time.Duration
@@ -40,12 +42,14 @@ type Conn struct {
 	adaptive   *AdaptiveFEC
 	retransmit *RetransmitQueue
 	closed     atomic.Bool
-	bytesSent atomic.Int64
-	bytesRecv atomic.Int64
-	pktsSent  atomic.Int64
-	pktsRecv  atomic.Int64
+	bytesSent  atomic.Int64
+	bytesRecv  atomic.Int64
+	pktsSent   atomic.Int64
+	pktsRecv   atomic.Int64
 	streamMode bool
 	writeMu    sync.Mutex
+	readBuf    []byte
+	sessionID  string // 连接迁移用
 }
 
 // Write 发送数据
@@ -93,8 +97,8 @@ func (c *Conn) Read(p []byte) (int, error) {
 		return c.dtls.Read(p)
 	}
 	for {
-		bufPtr := GetLargeBuf()
-		buf := *bufPtr
+		if c.readBuf == nil { c.readBuf = make([]byte, 65536) }
+		buf := c.readBuf
 		n, err := c.dtls.Read(buf)
 		if err != nil {
 			return 0, err
@@ -109,6 +113,8 @@ func (c *Conn) Read(p []byte) (int, error) {
 				if ack != nil {
 					rtt := c.seq.OnRecvACK(ack.AckSeq)
 					c.cc.OnACK(int64(n), rtt)
+				// 反馈RTT给FEC自适应
+				c.adaptive.RTT = rtt
 					c.retransmit.ACK(ack.AckSeq)
 				}
 				continue
@@ -118,12 +124,17 @@ func (c *Conn) Read(p []byte) (int, error) {
 				continue
 
 			case FrameData:
-				// 数据帧 → FEC解码
+				// 数据帧 → 发ACK + FEC解码
+				df := DecodeDataFrame(buf[:n])
+				if df != nil {
+					// 回ACK
+					ackFrame := EncodeACKFrame(df.Seq, 0)
+					c.dtls.Write(ackFrame)
+				}
 				decoded := c.fec.Decode(buf[:n])
 				if decoded != nil {
-				PutLargeBuf(bufPtr)
 					c.bytesRecv.Add(int64(len(decoded)))
-				copy(p, decoded)
+					copy(p, decoded)
 					return len(decoded), nil
 				}
 				continue
@@ -133,7 +144,6 @@ func (c *Conn) Read(p []byte) (int, error) {
 		// 旧格式兼容
 		decoded := c.fec.Decode(buf[:n])
 		if decoded != nil {
-				PutLargeBuf(bufPtr)
 			c.bytesRecv.Add(int64(len(decoded)))
 				copy(p, decoded)
 			return len(decoded), nil
@@ -176,6 +186,9 @@ type ConnStats struct {
 	RTT         time.Duration
 	LossRate    float64
 	RetransmitQ   int
+	Cwnd          int64
+	PacingRate    int64
+	State         string
 	BytesSent     int64
 	BytesReceived int64
 }
@@ -200,3 +213,31 @@ func (c *Conn) startRetransmitLoop() {
 }
 
 // ConnStats 连接统计
+
+// Migrate 连接迁移（IP变化时调用）
+// 保持session不变，只更新底层UDP地址
+func (c *Conn) Migrate(newAddr net.Addr) {
+	if dtls, ok := c.dtls.(*NDTLSConn); ok {
+		dtls.UpdateRemoteAddr(newAddr)
+	}
+}
+
+// SessionID 获取连接session ID
+func (c *Conn) SessionID() string {
+	return c.sessionID
+}
+
+// DiscoverMTU 探测路径MTU
+func (c *Conn) DiscoverMTU() int {
+	if dtls, ok := c.dtls.(*NDTLSConn); ok {
+		for mtu := 1500; mtu >= 500; mtu -= 100 {
+			probe := make([]byte, mtu)
+			probe[0] = FramePing
+			_, err := dtls.Write(probe)
+			if err == nil {
+				return mtu - 41 // 减去NRUP开销(13 header + 12 nonce + 16 tag)
+			}
+		}
+	}
+	return 1200 // 安全默认值
+}

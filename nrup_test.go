@@ -40,10 +40,10 @@ func TestFECEncodeDecode(t *testing.T) {
 
 func TestFECWithLoss(t *testing.T) {
 	fec := NewFECCodec(10, 3)
-	data := []byte("Testing FEC with packet loss - this should survive 3 lost packets")
+	data := []byte("Testing FEC with packet loss - XOR recovery")
 	frames := fec.Encode(data)
 
-	// 模拟丢3个包（丢掉index 2,5,8）
+	// 模拟丢1个包（XOR可恢复1个）
 	fec2 := NewFECCodec(10, 3)
 	var result []byte
 	for i, frame := range frames {

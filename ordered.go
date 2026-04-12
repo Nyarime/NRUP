@@ -2,71 +2,69 @@ package nrup
 
 import (
 	"sync"
+	"time"
 )
 
 // OrderedBuffer 有序交付缓冲
-// 确保数据按序列号顺序交付给应用层
+// 乱序到达的包按序号排队，超时后强制交付
 type OrderedBuffer struct {
 	mu       sync.Mutex
-	buffer   map[uint32][]byte // seq → data
-	nextSeq  uint32            // 期望的下一个seq
-	ready    chan struct{}      // 通知有数据可读
+	buffer   map[uint32][]byte
+	nextSeq  uint32
+	timeout  time.Duration
+	lastRecv time.Time
 }
 
 func NewOrderedBuffer() *OrderedBuffer {
 	return &OrderedBuffer{
-		buffer:  make(map[uint32][]byte),
-		nextSeq: 1,
-		ready:   make(chan struct{}, 256),
+		buffer:   make(map[uint32][]byte),
+		timeout:  50 * time.Millisecond, // 50ms超时强制交付
+		lastRecv: time.Now(),
 	}
 }
 
-// Insert 插入收到的数据（可能乱序）
-func (ob *OrderedBuffer) Insert(seq uint32, data []byte) {
+// Insert 插入数据，返回可以交付的有序数据
+func (ob *OrderedBuffer) Insert(seq uint32, data []byte) [][]byte {
 	ob.mu.Lock()
 	defer ob.mu.Unlock()
 
-	if seq < ob.nextSeq {
-		return // 旧包，丢弃
-	}
-
+	ob.lastRecv = time.Now()
 	ob.buffer[seq] = data
 
-	// 检查是否有连续可交付的
-	if seq == ob.nextSeq {
-		select {
-		case ob.ready <- struct{}{}:
-		default:
-		}
-	}
-}
-
-// Read 有序读取（阻塞直到下一个seq可用）
-func (ob *OrderedBuffer) Read() ([]byte, uint32) {
+	// 尝试按序交付
+	var result [][]byte
 	for {
-		ob.mu.Lock()
-		data, ok := ob.buffer[ob.nextSeq]
-		if ok {
-			seq := ob.nextSeq
-			delete(ob.buffer, seq)
-			ob.nextSeq++
-			ob.mu.Unlock()
-
-			// 检查后续是否也就绪
-			select {
-			case ob.ready <- struct{}{}:
-			default:
-			}
-			return data, seq
-		}
-		ob.mu.Unlock()
-
-		// 等待新数据
-		<-ob.ready
+		d, ok := ob.buffer[ob.nextSeq]
+		if !ok { break }
+		result = append(result, d)
+		delete(ob.buffer, ob.nextSeq)
+		ob.nextSeq++
 	}
+
+	// 超时检查：如果有积压且等了太久，跳过缺失的包
+	if len(ob.buffer) > 0 && len(result) == 0 {
+		if time.Since(ob.lastRecv) > ob.timeout {
+			// 找最小的积压序号，跳过缺失
+			minSeq := uint32(0xFFFFFFFF)
+			for s := range ob.buffer {
+				if s < minSeq { minSeq = s }
+			}
+			// 跳到最小积压序号
+			ob.nextSeq = minSeq
+			for {
+				d, ok := ob.buffer[ob.nextSeq]
+				if !ok { break }
+				result = append(result, d)
+				delete(ob.buffer, ob.nextSeq)
+				ob.nextSeq++
+			}
+		}
+	}
+
+	return result
 }
 
-// Pending 待交付的乱序包数量
+// Pending 返回积压的包数
 func (ob *OrderedBuffer) Pending() int {
 	ob.mu.Lock()
 	defer ob.mu.Unlock()

@@ -2,11 +2,13 @@ package nrup
 
 import (
 	"sync"
+	"time"
 )
 
 // AdaptiveFEC 自适应FEC比例控制
 // 根据实时丢包率自动调整冗余量
 type AdaptiveFEC struct {
+	RTT time.Duration // 当前RTT
 	mu          sync.Mutex
 	sent        int64
 	lost        int64
@@ -16,6 +18,9 @@ type AdaptiveFEC struct {
 	
 	MinParity int // 最小冗余 (默认1)
 	MaxParity int // 最大冗余 (默认10)
+
+	window  [100]bool // 滑动窗口
+	winIdx  int
 }
 
 func NewAdaptiveFEC(data, parity int) *AdaptiveFEC {
@@ -29,6 +34,7 @@ func NewAdaptiveFEC(data, parity int) *AdaptiveFEC {
 
 // RecordSent 记录发送
 func (a *AdaptiveFEC) RecordSent(n int) {
+	a.window[a.winIdx % 100] = false
 	a.mu.Lock()
 	a.sent += int64(n)
 	a.mu.Unlock()
@@ -36,6 +42,8 @@ func (a *AdaptiveFEC) RecordSent(n int) {
 
 // RecordLoss 记录丢包
 func (a *AdaptiveFEC) RecordLoss(n int) {
+	a.window[a.winIdx % 100] = true
+	a.winIdx++
 	a.mu.Lock()
 	a.lost += int64(n)
 	a.mu.Unlock()
@@ -46,11 +54,23 @@ func (a *AdaptiveFEC) Adjust() (data, parity int) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	if a.sent < 100 {
+	if a.sent < 20 {
 		return a.DataShards, a.ParityShards
 	}
 
-	lossRate := float64(a.lost) / float64(a.sent)
+	// 滑动窗口丢包率（最近100包）
+	lostInWindow := 0
+	windowSize := int(a.sent)
+	if windowSize > 100 { windowSize = 100 }
+	for i := 0; i < windowSize; i++ {
+		if a.window[i] { lostInWindow++ }
+	}
+	lossRate := float64(lostInWindow) / float64(windowSize)
+
+	// 高RTT时增加冗余（重传代价大）
+	rttFactor := 1.0
+	if a.RTT > 100*time.Millisecond { rttFactor = 1.5 }
+	if a.RTT > 300*time.Millisecond { rttFactor = 2.0 }
 
 	// 根据丢包率调整
 	switch {
@@ -59,9 +79,9 @@ func (a *AdaptiveFEC) Adjust() (data, parity int) {
 	case lossRate < 0.05: // 1-5%
 		a.ParityShards = 2
 	case lossRate < 0.10: // 5-10%
-		a.ParityShards = 3
+		a.ParityShards = int(float64(3) * rttFactor)
 	case lossRate < 0.20: // 10-20%
-		a.ParityShards = 5
+		a.ParityShards = int(float64(5) * rttFactor)
 	case lossRate < 0.30: // 20-30%
 		a.ParityShards = 7
 	default: // >30%

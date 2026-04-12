@@ -4,7 +4,6 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
-	"net"
 	"testing"
 
 	"golang.org/x/crypto/chacha20poly1305"
@@ -62,28 +61,6 @@ func BenchmarkAESGCMEncrypt(b *testing.B) {
 	}
 }
 
-func BenchmarkNDTLSWrite(b *testing.B) {
-	key := make([]byte, 32)
-	rand.Read(key)
-
-	sAddr, _ := net.ResolveUDPAddr("udp", ":19890")
-	sConn, err := net.ListenUDP("udp", sAddr)
-	if err != nil {
-		b.Skip("port")
-		return
-	}
-	defer sConn.Close()
-
-	rAddr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:19890")
-	mc, _ := NewNDTLS(sConn, rAddr, key, &Config{FECData: 1, FECParity: 0})
-	data := make([]byte, 200)
-
-	b.SetBytes(200)
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		mc.Write(data)
-	}
-}
 
 func BenchmarkChaCha20Encrypt(b *testing.B) {
 	key := make([]byte, 32)
@@ -99,3 +76,4 @@ func BenchmarkChaCha20Encrypt(b *testing.B) {
 		aead.Seal(nonce, nonce, data, nil)
 	}
 }
+

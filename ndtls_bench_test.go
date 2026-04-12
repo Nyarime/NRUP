@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"io"
+	"net"
 	"testing"
 )
 
@@ -24,7 +25,7 @@ func BenchmarkDTLSRecordFormat(b *testing.B) {
 		io.ReadFull(rand.Reader, nonce)
 		encrypted := aead.Seal(nil, nonce, data, nil)
 		payload := append(nonce, encrypted...)
-		
+
 		seq++
 		record := make([]byte, 13+len(payload))
 		record[0] = 23
@@ -33,5 +34,27 @@ func BenchmarkDTLSRecordFormat(b *testing.B) {
 		binary.BigEndian.PutUint16(record[11:13], uint16(len(payload)))
 		copy(record[13:], payload)
 		_ = record
+	}
+}
+
+func BenchmarkNDTLSWrite(b *testing.B) {
+	key := make([]byte, 32)
+	rand.Read(key)
+
+	conn, _ := net.ListenUDP("udp", nil)
+	defer conn.Close()
+
+	target, _ := net.ResolveUDPAddr("udp", "127.0.0.1:1")
+	cfg := DefaultConfig()
+	cfg.MaxBandwidthMbps = 10000 // 10Gbps避免CC阻塞
+	ndtls, _ := NewNDTLS(conn, target, key, cfg)
+
+	data := make([]byte, 200)
+	rand.Read(data)
+
+	b.SetBytes(200)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		ndtls.Write(data)
 	}
 }

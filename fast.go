@@ -48,7 +48,7 @@ func NewFastConn(udpConn *net.UDPConn, remoteAddr *net.UDPAddr, key []byte, cfg 
 		remoteAddr: remoteAddr,
 		aead:       aead,
 		fec:        NewFECCodec(cfg.FECData, cfg.FECParity),
-		cc:         NewCongestionController(cfg.MaxBandwidth),
+		cc:         NewCongestionController(cfg.MaxBandwidthMbps * 1000000 / 8),
 		seq:        NewSeqTracker(),
 		adaptive:   NewAdaptiveFEC(cfg.FECData, cfg.FECParity),
 		retransmit: NewRetransmitQueue(),

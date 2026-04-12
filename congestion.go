@@ -7,82 +7,86 @@ import (
 	"time"
 )
 
-// BBR-style congestion controller
-// 基于Google BBR论文的简化实现
-// 核心思想: 用最大带宽和最小RTT估算最优发送速率
+// BBR congestion controller
+// Based on Google BBR (Bottleneck Bandwidth and Round-trip propagation time)
+// Reference: https://datatracker.ietf.org/doc/html/draft-cardwell-iccrg-bbr-congestion-control
 
-// CongestionController BBR拥塞控制器
 type CongestionController struct {
 	mu sync.Mutex
 
-	// 估算值
-	maxBW     int64         // 最大观测带宽 (bytes/s)
-	minRTT    time.Duration // 最小观测RTT
+	// Estimates
+	maxBW     int64         // max observed bandwidth (bytes/s)
+	minRTT    time.Duration // min observed RTT
 	lastRTT   time.Duration
+	rtt       time.Duration // smoothed RTT (exported for stats)
 
-	// 状态
+	// State
 	bytesInFlight atomic.Int64
-	delivered     int64 // 已确认的字节数
+	delivered     int64
 	deliveredTime time.Time
 
-	// 窗口
-	cwnd         int64 // 拥塞窗口 (bytes)
-	pacingRate   int64 // 发送速率 (bytes/s)
+	// Window
+	cwnd       int64 // congestion window (bytes)
+	pacingRate int64 // send rate (bytes/s)
 
-	// BBR状态机
-	state        bbrState
-	cycleIdx     int
-	probeRTTTime time.Time
+	// BBR state machine
+	state          bbrState
+	cycleIdx       int
+	probeRTTStart  time.Time
+	minRTTExpiry   time.Time // minRTT expires after 10s, triggers ProbeRTT
+	probeRTTDone   bool
+	priorCwnd      int64 // saved cwnd before ProbeRTT
 
-	// 带宽采样
-	bwSamples    [10]int64 // 最近10个带宽样本
+	// Bandwidth samples (sliding window)
+	bwSamples    [10]int64
 	bwSampleIdx  int
 	rttSamples   [10]time.Duration
 	rttSampleIdx int
 
-	// 限制
-	maxBandwidth int64 // 用户设置的上限, 0=不限
+	// Limits
+	maxBandwidth int64 // user-configured cap, 0=unlimited
 }
 
 type bbrState int
 
 const (
-	bbrStartup   bbrState = iota // 指数增长探测带宽
-	bbrDrain                      // 排空队列
-	bbrProbeBW                    // 稳态，周期性探测
-	bbrProbeRTT                   // 探测最小RTT
+	bbrStartup  bbrState = iota // exponential BW growth
+	bbrDrain                     // drain inflight to BDP
+	bbrProbeBW                   // steady state, cycle gains
+	bbrProbeRTT                  // measure min RTT
 )
 
 const (
-	startupGain = 2.89  // 2/ln(2)
-	drainGain   = 0.35  // 1/startupGain
-	steadyGain  = 1.0
-	probeGains  = 1.25  // 探测时加25%
+	startupGain    = 2.89  // 2/ln(2)
+	drainGain      = 0.35  // 1/startupGain
+	steadyGain     = 1.0
+	probeRTTCwnd   = 4 * 1500 // 4 packets during ProbeRTT
+	minRTTWindow   = 10 * time.Second
+	probeRTTDuration = 200 * time.Millisecond
 
-	initCwnd    = 32768  // 初始32KB
-	minCwnd     = 4096   // 最小4KB
+	initCwnd = 32768  // 32KB
+	minCwnd  = 4096   // 4KB
 )
 
-// NewCongestionController 创建BBR控制器
 func NewCongestionController(maxBW int64) *CongestionController {
 	cc := &CongestionController{
-		maxBandwidth: maxBW,
-		cwnd:         initCwnd,
-		minRTT:       time.Duration(math.MaxInt64),
-		state:        bbrStartup,
+		maxBandwidth:  maxBW,
+		cwnd:          initCwnd,
+		minRTT:        time.Duration(math.MaxInt64),
+		state:         bbrStartup,
 		deliveredTime: time.Now(),
+		minRTTExpiry:  time.Now().Add(minRTTWindow),
 	}
 	return cc
 }
 
-// Wait 等待发送许可
+// Wait for send permission (pacing + cwnd)
 func (cc *CongestionController) Wait(size int) {
 	for cc.bytesInFlight.Load() > cc.cwnd {
 		time.Sleep(time.Millisecond)
 	}
 	cc.bytesInFlight.Add(int64(size))
 
-	// 按pacing rate限速
 	if cc.pacingRate > 0 {
 		delay := time.Duration(float64(size) / float64(cc.pacingRate) * float64(time.Second))
 		if delay > 500*time.Microsecond {
@@ -91,7 +95,7 @@ func (cc *CongestionController) Wait(size int) {
 	}
 }
 
-// OnACK 收到确认
+// OnACK processes acknowledgment
 func (cc *CongestionController) OnACK(bytes int64, rtt time.Duration) {
 	cc.mu.Lock()
 	defer cc.mu.Unlock()
@@ -100,22 +104,31 @@ func (cc *CongestionController) OnACK(bytes int64, rtt time.Duration) {
 	cc.lastRTT = rtt
 
 	if rtt > 0 {
-		// 更新最小RTT
-		if rtt < cc.minRTT {
-			cc.minRTT = rtt
+		// Smoothed RTT (EWMA)
+		if cc.rtt == 0 {
+			cc.rtt = rtt
+		} else {
+			cc.rtt = cc.rtt*7/8 + rtt/8 // EWMA alpha=0.125 (RFC 6298)
 		}
+
+		// Update min RTT
+		if rtt < cc.minRTT || time.Now().After(cc.minRTTExpiry) {
+			cc.minRTT = rtt
+			cc.minRTTExpiry = time.Now().Add(minRTTWindow)
+		}
+
 		cc.rttSamples[cc.rttSampleIdx%10] = rtt
 		cc.rttSampleIdx++
 
-		// 计算带宽样本
+		// Bandwidth sample
 		now := time.Now()
 		elapsed := now.Sub(cc.deliveredTime)
 		if elapsed > 0 {
 			bw := bytes * int64(time.Second) / int64(elapsed)
 			cc.bwSamples[cc.bwSampleIdx%10] = bw
 			cc.bwSampleIdx++
-			
-			// 最大带宽 = 最近10个样本的最大值
+
+			// Max BW = max of recent samples
 			cc.maxBW = 0
 			for _, s := range cc.bwSamples {
 				if s > cc.maxBW {
@@ -127,21 +140,17 @@ func (cc *CongestionController) OnACK(bytes int64, rtt time.Duration) {
 		cc.deliveredTime = now
 	}
 
-	// BBR状态机
 	cc.updateState()
-
-	// 更新cwnd和pacing rate
 	cc.updateCwnd()
 }
 
-// OnLoss 检测到丢包
+// OnLoss handles packet loss
 func (cc *CongestionController) OnLoss() {
 	cc.mu.Lock()
 	defer cc.mu.Unlock()
 
-	// BBR不像CUBIC那样大幅降窗
-	// 只减少一点，避免排队
-	cc.cwnd = cc.cwnd * 85 / 100 // 降15%（比TCP温和）
+	// BBR: gentle reduction (not halving like CUBIC)
+	cc.cwnd = cc.cwnd * 85 / 100
 	if cc.cwnd < minCwnd {
 		cc.cwnd = minCwnd
 	}
@@ -150,17 +159,19 @@ func (cc *CongestionController) OnLoss() {
 func (cc *CongestionController) updateState() {
 	switch cc.state {
 	case bbrStartup:
-		// 如果带宽不再增长，进入Drain
+		// Exit startup when BW plateaus
 		if cc.bwSampleIdx >= 3 {
 			recent := cc.bwSamples[(cc.bwSampleIdx-1)%10]
 			prev := cc.bwSamples[(cc.bwSampleIdx-2)%10]
-			if recent <= prev {
+			// BW growth < 25% → startup done
+			if prev > 0 && float64(recent)/float64(prev) < 1.25 {
 				cc.state = bbrDrain
+				cc.priorCwnd = cc.cwnd
 			}
 		}
 
 	case bbrDrain:
-		// 排空队列后进入ProbeBW
+		// Drain until inflight <= BDP
 		if cc.bytesInFlight.Load() <= cc.bdp() {
 			cc.state = bbrProbeBW
 			cc.cycleIdx = 0
@@ -168,17 +179,29 @@ func (cc *CongestionController) updateState() {
 
 	case bbrProbeBW:
 		cc.cycleIdx++
-		// 每10个RTT进行一次ProbeRTT
-		if cc.cycleIdx >= 10 && time.Since(cc.probeRTTTime) > 10*time.Second {
+		// Check if minRTT needs refresh
+		if time.Now().After(cc.minRTTExpiry) {
 			cc.state = bbrProbeRTT
-			cc.probeRTTTime = time.Now()
+			cc.probeRTTStart = time.Now()
+			cc.priorCwnd = cc.cwnd
+			cc.probeRTTDone = false
 		}
 
 	case bbrProbeRTT:
-		// 200ms后回到ProbeBW
-		if time.Since(cc.probeRTTTime) > 200*time.Millisecond {
+		// Reduce cwnd to 4 packets to measure true minRTT
+		if !cc.probeRTTDone {
+			if cc.bytesInFlight.Load() <= probeRTTCwnd {
+				cc.probeRTTDone = true
+				cc.probeRTTStart = time.Now()
+			}
+		}
+		// Hold for 200ms then exit
+		if cc.probeRTTDone && time.Since(cc.probeRTTStart) > probeRTTDuration {
+			cc.minRTTExpiry = time.Now().Add(minRTTWindow)
 			cc.state = bbrProbeBW
 			cc.cycleIdx = 0
+			// Restore cwnd
+			cc.cwnd = cc.priorCwnd
 		}
 	}
 }
@@ -193,11 +216,14 @@ func (cc *CongestionController) updateCwnd() {
 	case bbrDrain:
 		gain = drainGain
 	case bbrProbeBW:
-		// 周期性探测: 1.25, 0.75, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0
+		// Cycle: 1.25, 0.75, 1.0×6
 		gains := []float64{1.25, 0.75, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0}
 		gain = gains[cc.cycleIdx%8]
 	case bbrProbeRTT:
-		gain = 0.5
+		// Minimal cwnd during probe
+		cc.cwnd = probeRTTCwnd
+		cc.pacingRate = int64(float64(cc.maxBW) * 0.5)
+		return
 	}
 
 	cc.cwnd = int64(float64(bdp) * gain)
@@ -207,13 +233,11 @@ func (cc *CongestionController) updateCwnd() {
 
 	cc.pacingRate = int64(float64(cc.maxBW) * gain)
 
-	// 用户限速
 	if cc.maxBandwidth > 0 && cc.pacingRate > cc.maxBandwidth {
 		cc.pacingRate = cc.maxBandwidth
 	}
 }
 
-// bdp 带宽延迟积
 func (cc *CongestionController) bdp() int64 {
 	if cc.maxBW == 0 || cc.minRTT == time.Duration(math.MaxInt64) {
 		return initCwnd
@@ -221,7 +245,6 @@ func (cc *CongestionController) bdp() int64 {
 	return cc.maxBW * int64(cc.minRTT) / int64(time.Second)
 }
 
-// GetState 获取当前状态（调试用）
 func (cc *CongestionController) GetState() string {
 	states := []string{"startup", "drain", "probe_bw", "probe_rtt"}
 	cc.mu.Lock()
