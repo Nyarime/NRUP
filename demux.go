@@ -20,6 +20,8 @@ type demuxedConn struct {
 	remoteAddr *net.UDPAddr
 	recvCh     chan []byte
 	demux      *udpDemux
+	closeOnce  sync.Once
+	closed     chan struct{}
 }
 
 func newUDPDemux(conn *net.UDPConn) *udpDemux {
@@ -55,7 +57,8 @@ func (d *udpDemux) readLoop() {
 			dc := v.(*demuxedConn)
 			select {
 			case dc.recvCh <- data:
-			default: // 队列满丢弃
+			case <-dc.closed:
+			default:
 			}
 			continue
 		}
@@ -66,6 +69,7 @@ func (d *udpDemux) readLoop() {
 			remoteAddr: addr,
 			recvCh:     make(chan []byte, 256),
 			demux:      d,
+			closed:     make(chan struct{}),
 		}
 		dc.recvCh <- data // 第一个包
 		d.routes.Store(key, dc)
@@ -83,12 +87,16 @@ func (d *udpDemux) close() {
 
 // net.PacketConn接口实现——让nDTLS以为自己有独立连接
 func (dc *demuxedConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
-	data, ok := <-dc.recvCh
-	if !ok {
+	select {
+	case data, ok := <-dc.recvCh:
+		if !ok {
+			return 0, nil, net.ErrClosed
+		}
+		n = copy(p, data)
+		return n, dc.remoteAddr, nil
+	case <-dc.closed:
 		return 0, nil, net.ErrClosed
 	}
-	n = copy(p, data)
-	return n, dc.remoteAddr, nil
 }
 
 func (dc *demuxedConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
@@ -96,8 +104,10 @@ func (dc *demuxedConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 }
 
 func (dc *demuxedConn) Close() error {
-	dc.demux.routes.Delete(dc.remoteAddr.String())
-	close(dc.recvCh)
+	dc.closeOnce.Do(func() {
+		dc.demux.routes.Delete(dc.remoteAddr.String())
+		close(dc.closed)
+	})
 	return nil
 }
 
