@@ -84,16 +84,6 @@ conn.Write([]byte("hello"))
 n, _ := conn.Read(buf)
 ```
 
-## Port Forwarding (Encrypted Tunnel)
-
-```bash
-# Server: forward to local MySQL
-nrup-tunnel -mode server -listen :4000 -forward 127.0.0.1:3306 -password secret
-
-# Client: local 13306 → remote 3306
-nrup-tunnel -mode client -server 1.2.3.4:4000 -listen :13306 -password secret
-```
-
 ## Configuration
 
 ```go

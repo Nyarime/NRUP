@@ -102,19 +102,6 @@ cfg.ResumeID = sessionID
 conn, _ = nrup.Dial(addr, cfg)
 ```
 
-## 端口转发（加密隧道）
-
-```bash
-# 服务端：转发到本地 MySQL
-nrup-tunnel -mode server -listen :4000 -forward 127.0.0.1:3306 -password secret
-
-# 客户端：本地 13306 → 远端 3306
-nrup-tunnel -mode client -server 1.2.3.4:4000 -listen :13306 -password secret
-
-# 然后
-mysql -h 127.0.0.1 -P 13306
-```
-
 ## 配置
 
 ```go
