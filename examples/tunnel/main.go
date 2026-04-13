@@ -3,26 +3,26 @@ package main
 import (
 	"crypto/sha256"
 	"flag"
-	"io"
 	"log"
 	"net"
-	"sync"
 
 	"github.com/nyarime/nrup"
 )
 
-// nrup-tunnel: 两台服务器之间的加密隧道
+// nrup-tunnel: UDP端口转发（加密隧道）
 //
 // 用法:
-//   服务端: nrup-tunnel -mode server -listen :4000 -forward 127.0.0.1:3306 -password secret
-//   客户端: nrup-tunnel -mode client -server 1.2.3.4:4000 -listen :13306 -password secret
+//   服务端: nrup-tunnel -mode server -listen :4000 -forward 127.0.0.1:53 -password secret
+//   客户端: nrup-tunnel -mode client -server 1.2.3.4:4000 -listen :1053 -password secret
 //
-// 效果: 本地:13306 ← NRUP加密隧道 → 远端:3306
+// 效果: 本地UDP:1053 ← NRUP加密隧道 → 远端UDP:53
 //
 // 场景:
-//   MySQL/Redis/SSH 跨机房加密访问
-//   游戏服务器间低延迟可靠通信
-//   内网服务暴露（替代 frp/ngrok）
+//   DNS加密转发
+//   游戏服务器UDP中继
+//   音视频UDP加速
+//
+// 注意: 仅支持UDP转发。TCP转发请使用 NekoPass Lite。
 
 func main() {
 	mode := flag.String("mode", "", "server / client")
@@ -65,14 +65,14 @@ func makeCfg(password, cipher, disguise string) *nrup.Config {
 	return cfg
 }
 
-// runServer NRUP监听 → 转发到本地服务
+// runServer NRUP监听 → 转发到本地UDP服务
 func runServer(listenAddr, forwardAddr, password, cipher, disguise string) {
 	cfg := makeCfg(password, cipher, disguise)
 	listener, err := nrup.Listen(listenAddr, cfg)
 	if err != nil {
 		log.Fatal(err)
 	}
-	log.Printf("Tunnel Server %s → %s", listenAddr, forwardAddr)
+	log.Printf("UDP Tunnel Server %s → %s", listenAddr, forwardAddr)
 
 	for {
 		conn, err := listener.Accept()
@@ -81,52 +81,80 @@ func runServer(listenAddr, forwardAddr, password, cipher, disguise string) {
 		}
 		go func() {
 			defer conn.Close()
-			local, err := net.Dial("tcp", forwardAddr)
+
+			rAddr, err := net.ResolveUDPAddr("udp", forwardAddr)
 			if err != nil {
-				log.Printf("连接 %s 失败: %v", forwardAddr, err)
+				return
+			}
+			local, err := net.DialUDP("udp", nil, rAddr)
+			if err != nil {
 				return
 			}
 			defer local.Close()
-			relay(conn, local)
+
+			// NRUP → 本地UDP
+			go func() {
+				buf := make([]byte, 4096)
+				for {
+					n, err := conn.Read(buf)
+					if err != nil { return }
+					local.Write(buf[:n])
+				}
+			}()
+
+			// 本地UDP → NRUP
+			buf := make([]byte, 4096)
+			for {
+				n, err := local.Read(buf)
+				if err != nil { return }
+				conn.Write(buf[:n])
+			}
 		}()
 	}
 }
 
-// runClient 本地TCP监听 → NRUP连接到远端
+// runClient 本地UDP监听 → NRUP连接到远端
 func runClient(serverAddr, listenAddr, password, cipher, disguise string) {
 	cfg := makeCfg(password, cipher, disguise)
-	ln, err := net.Listen("tcp", listenAddr)
+
+	lAddr, err := net.ResolveUDPAddr("udp", listenAddr)
 	if err != nil {
 		log.Fatal(err)
 	}
-	log.Printf("Tunnel Client %s → %s", listenAddr, serverAddr)
+	local, err := net.ListenUDP("udp", lAddr)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("UDP Tunnel Client %s → %s", listenAddr, serverAddr)
+
+	buf := make([]byte, 4096)
+	var clientAddr *net.UDPAddr
+	var remote *nrup.Conn
 
 	for {
-		local, err := ln.Accept()
+		n, addr, err := local.ReadFromUDP(buf)
 		if err != nil {
 			continue
 		}
-		go func() {
-			defer local.Close()
 
-			remoteCfg := makeCfg(password, cipher, disguise)
-			remoteCfg.StreamMode = true // TCP转发用流模式
-			remote, err := nrup.Dial(serverAddr, remoteCfg)
+		if remote == nil {
+			clientAddr = addr
+			remote, err = nrup.Dial(serverAddr, cfg)
 			if err != nil {
 				log.Printf("NRUP连接失败: %v", err)
-				return
+				continue
 			}
-			defer remote.Close()
-			relay(local, remote)
-		}()
-	}
-	_ = cfg
-}
+			// 远端 → 本地
+			go func() {
+				rbuf := make([]byte, 4096)
+				for {
+					n, err := remote.Read(rbuf)
+					if err != nil { return }
+					local.WriteToUDP(rbuf[:n], clientAddr)
+				}
+			}()
+		}
 
-func relay(a, b net.Conn) {
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() { defer wg.Done(); io.Copy(a, b) }()
-	go func() { defer wg.Done(); io.Copy(b, a) }()
-	wg.Wait()
+		remote.Write(buf[:n])
+	}
 }
