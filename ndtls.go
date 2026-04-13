@@ -83,7 +83,7 @@ func (mc *NDTLSConn) Write(p []byte) (int, error) {
 	payloadLen := nonceSize + len(p) + overhead
 
 	// 无伪装模式：跳过DTLS record header
-	if mc.disgui == "none" || mc.disgui == "" {
+	if mc.disgui == "none" {
 		buf := make([]byte, payloadLen)
 		nonce := buf[:nonceSize]
 		if nonceSize > 0 {
@@ -158,7 +158,7 @@ func (mc *NDTLSConn) Read(p []byte) (int, error) {
 	}
 
 	// 无伪装模式：直接解密，无record header
-	if mc.disgui == "none" || mc.disgui == "" {
+	if mc.disgui == "none" {
 		nonceSize := mc.aead.NonceSize()
 		if n < nonceSize {
 			return 0, errors.New("packet too short")

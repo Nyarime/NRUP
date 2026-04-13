@@ -82,11 +82,18 @@ func (c *Conn) Write(p []byte) (int, error) {
 		pkt[3] = byte(seq >> 8)
 		pkt[4] = byte(seq)
 		copy(pkt[5:], p)
-		// 动态冗余：高丢包时发3份
+		// 自适应冗余：根据实时丢包率动态调整副本数
 		redundancy := 2
 		m := c.GetMetrics()
-		if m.LossRate > 0.35 {
+		switch {
+		case m.LossRate > 0.50:
+			redundancy = 5
+		case m.LossRate > 0.35:
+			redundancy = 4
+		case m.LossRate > 0.20:
 			redundancy = 3
+		default:
+			redundancy = 2
 		}
 		for i := 0; i < redundancy; i++ {
 			c.dtls.Write(pkt)
