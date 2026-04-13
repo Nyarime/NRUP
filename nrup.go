@@ -60,6 +60,7 @@ type Conn struct {
 	writeMu    sync.Mutex
 	readBuf    []byte
 	seenSmall  map[uint32]bool
+	streamEnc  *StreamEncoder
 	sessionID  string // 连接迁移用
 }
 
@@ -357,9 +358,17 @@ func (c *Conn) smallThreshold() int {
 
 // CloseGraceful 优雅关闭（通知对端）
 func (c *Conn) CloseGraceful() error {
+	// Flush流式FEC剩余数据
+	if c.streamEnc != nil {
+		if frames := c.streamEnc.Flush(); frames != nil {
+			for _, f := range frames {
+				c.dtls.Write(f)
+			}
+		}
+	}
 	// 发送关闭帧
 	c.dtls.Write([]byte{FrameClose})
-	c.dtls.Write([]byte{FrameClose}) // 冗余
+	c.dtls.Write([]byte{FrameClose})
 	time.Sleep(50 * time.Millisecond)
 	c.closed.Store(true)
 	return c.dtls.Close()

@@ -154,3 +154,47 @@ type FECStats struct {
 	GroupsRecovered int
 	GroupsFailed int
 }
+
+// StreamEncoder 流式FEC编码（大包不等凑齐group）
+type StreamEncoder struct {
+	codec  *FECCodec
+	buffer []byte
+	mu     sync.Mutex
+	maxBuf int
+}
+
+func NewStreamEncoder(dataShards, parityShards int) *StreamEncoder {
+	return &StreamEncoder{
+		codec:  NewFECCodec(dataShards, parityShards),
+		buffer: make([]byte, 0, dataShards*1400),
+		maxBuf: dataShards * 1400,
+	}
+}
+
+// Write 接收数据，凑够一个group自动编码
+func (s *StreamEncoder) Write(data []byte) ([][]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.buffer = append(s.buffer, data...)
+
+	if len(s.buffer) >= s.maxBuf {
+		chunk := s.buffer[:s.maxBuf]
+		s.buffer = append([]byte{}, s.buffer[s.maxBuf:]...)
+		return s.codec.Encode(chunk), nil
+	}
+	return nil, nil
+}
+
+// Flush 强制编码剩余数据
+func (s *StreamEncoder) Flush() [][]byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(s.buffer) == 0 {
+		return nil
+	}
+	frames := s.codec.Encode(s.buffer)
+	s.buffer = s.buffer[:0]
+	return frames
+}
