@@ -11,10 +11,6 @@ import (
 )
 
 // SessionCache 会话缓存（0-RTT快速重连）
-type SessionCache struct {
-	mu       sync.RWMutex
-	sessions map[string]*CachedSession
-}
 
 type CachedSession struct {
 	Key       []byte
@@ -22,31 +18,8 @@ type CachedSession struct {
 	TTL       time.Duration
 }
 
-var globalCache = &SessionCache{
-	sessions: make(map[string]*CachedSession),
-}
 
-// Save 缓存会话密钥
-func (sc *SessionCache) Save(sessionID string, key []byte, ttl time.Duration) {
-	sc.mu.Lock()
-	sc.sessions[sessionID] = &CachedSession{
-		Key:       key,
-		CreatedAt: time.Now(),
-		TTL:       ttl,
-	}
-	sc.mu.Unlock()
-}
 
-// Get 获取缓存的密钥
-func (sc *SessionCache) Get(sessionID string) ([]byte, bool) {
-	sc.mu.RLock()
-	defer sc.mu.RUnlock()
-	s, ok := sc.sessions[sessionID]
-	if !ok || time.Since(s.CreatedAt) > s.TTL {
-		return nil, false
-	}
-	return s.Key, true
-}
 
 // 0-RTT Resume帧格式:
 // [1B type=0x04][32B sessionID][32B HMAC(key, timestamp)]
@@ -55,7 +28,7 @@ const frameResume = 0x04
 
 // clientResume 尝试0-RTT恢复
 func clientResume(conn *net.UDPConn, serverAddr *net.UDPAddr, sessionID string) ([]byte, bool) {
-	key, ok := globalCache.Get(sessionID)
+	key, ok := globalStore.Get(sessionID)
 	if !ok {
 		return nil, false
 	}
@@ -94,7 +67,7 @@ func serverResume(conn net.PacketConn, clientAddr net.Addr, frame []byte) ([]byt
 	}
 
 	sessionID := string(frame[1:33])
-	key, ok := globalCache.Get(sessionID)
+	key, ok := globalStore.Get(sessionID)
 	if !ok {
 		return nil, "", false
 	}
@@ -119,18 +92,64 @@ func serverResume(conn net.PacketConn, clientAddr net.Addr, frame []byte) ([]byt
 }
 
 // 清理过期缓存
+// SessionStore 会话持久化接口
+// 默认用内存。可实现Redis/文件版本用于跨重启恢复。
+type SessionStore interface {
+	Save(sessionID string, key []byte, ttl time.Duration) error
+	Get(sessionID string) ([]byte, bool)
+	Delete(sessionID string)
+}
+
+// SetSessionStore 替换全局会话存储（启动时调用）
+func SetSessionStore(store SessionStore) {
+	globalStore = store
+}
+
+var globalStore SessionStore = &memoryStore{sessions: make(map[string]*CachedSession)}
+
+// memoryStore 内存存储（默认）
+type memoryStore struct {
+	mu       sync.RWMutex
+	sessions map[string]*CachedSession
+}
+
+func (m *memoryStore) Save(sessionID string, key []byte, ttl time.Duration) error {
+	m.mu.Lock()
+	m.sessions[sessionID] = &CachedSession{Key: key, CreatedAt: time.Now(), TTL: ttl}
+	m.mu.Unlock()
+	return nil
+}
+
+func (m *memoryStore) Get(sessionID string) ([]byte, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	s, ok := m.sessions[sessionID]
+	if !ok || time.Since(s.CreatedAt) > s.TTL {
+		return nil, false
+	}
+	return s.Key, true
+}
+
+func (m *memoryStore) Delete(sessionID string) {
+	m.mu.Lock()
+	delete(m.sessions, sessionID)
+	m.mu.Unlock()
+}
+
 func init() {
 	go func() {
 		for {
 			time.Sleep(5 * time.Minute)
-			globalCache.mu.Lock()
-			now := time.Now()
-			for id, s := range globalCache.sessions {
-				if now.Sub(s.CreatedAt) > s.TTL {
-					delete(globalCache.sessions, id)
+			if ms, ok := globalStore.(*memoryStore); ok {
+				ms.mu.Lock()
+				now := time.Now()
+				for id, s := range ms.sessions {
+					if now.Sub(s.CreatedAt) > s.TTL {
+						delete(ms.sessions, id)
+					}
 				}
+				ms.mu.Unlock()
 			}
-			globalCache.mu.Unlock()
 		}
 	}()
 }

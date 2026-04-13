@@ -72,7 +72,7 @@ func Dial(addr string, cfg *Config) (*Conn, error) {
 		sessionID:  generateSessionID(),
 	}
 	go conn.startRetransmitLoop()
-	globalCache.Save(conn.sessionID, key, 24*time.Hour)
+	globalStore.Save(conn.sessionID, key, 24*time.Hour)
 	return conn, nil
 }
 
