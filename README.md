@@ -15,12 +15,6 @@ go get github.com/nyarime/nrup@v1.2.1
 
 要求 Go 1.22+。
 
-## Naixi 协议栈
-
-| 协议 | 传输层 | 仓库 |
-|------|--------|------|
-| NRUP | UDP (FEC+ARQ+BBR) | [github.com/Nyarime/NRUP](https://github.com/Nyarime/NRUP) |
-| NRTP | TCP (fake-tls+WS) | [github.com/Nyarime/NRTP](https://github.com/Nyarime/NRTP) |
 
 ## 三档模式
 
