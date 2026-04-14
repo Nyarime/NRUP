@@ -6,23 +6,31 @@ import (
 )
 
 // AdaptiveFEC 自适应FEC比例控制
-// 根据实时丢包率+FEC有效性自动调整冗余量
+// EWMA平滑 + FEC有效性反馈 + 连续丢包立即响应
 type AdaptiveFEC struct {
-	RTT time.Duration // 当前RTT
-	mu          sync.Mutex
-	sent        int64
-	lost        int64
-	
-	DataShards   int // 当前数据分片数
-	ParityShards int // 当前冗余分片数
-	
-	MinParity int // 最小冗余 (默认1)
-	MaxParity int // 最大冗余 (默认10)
+	RTT time.Duration
+	mu  sync.Mutex
 
-	window  [100]bool // 滑动窗口
-	winIdx  int
-	
-	fecCodec *FECCodec // FEC有效性反馈源
+	DataShards   int
+	ParityShards int
+	MinParity    int // 默认1
+	MaxParity    int // 默认10
+
+	// 滑动窗口
+	window [100]bool
+	winIdx int
+	sent   int64
+	lost   int64
+
+	// EWMA平滑(v1.4.2: 防震荡)
+	ewmaEff      float64 // EWMA平滑后的FEC有效性
+	ewmaAlpha    float64 // EWMA系数(默认0.3)
+
+	// 连续丢包检测(v1.4.2: 立即响应)
+	consecutiveLoss int
+	lastParity      int // 上次parity值(检测变化)
+
+	fecCodec *FECCodec
 }
 
 func NewAdaptiveFEC(data, parity int) *AdaptiveFEC {
@@ -31,27 +39,43 @@ func NewAdaptiveFEC(data, parity int) *AdaptiveFEC {
 		ParityShards: parity,
 		MinParity:    1,
 		MaxParity:    10,
+		ewmaAlpha:    0.3,
+		lastParity:   parity,
 	}
 }
 
 // RecordSent 记录发送
 func (a *AdaptiveFEC) RecordSent(n int) {
-	a.window[a.winIdx % 100] = false
+	a.window[a.winIdx%100] = false
 	a.mu.Lock()
 	a.sent += int64(n)
+	a.consecutiveLoss = 0 // 发送成功重置
 	a.mu.Unlock()
 }
 
-// RecordLoss 记录丢包
+// RecordLoss 记录丢包 + 连续丢包检测
 func (a *AdaptiveFEC) RecordLoss(n int) {
-	a.window[a.winIdx % 100] = true
+	a.window[a.winIdx%100] = true
 	a.winIdx++
 	a.mu.Lock()
 	a.lost += int64(n)
+	a.consecutiveLoss += n
+
+	// v1.4.2: 连续>=5个包丢失 → 立即提升FEC(不等30包周期)
+	if a.consecutiveLoss >= 5 {
+		boost := a.consecutiveLoss / 5 // 每5个连续丢包+1 parity
+		if boost > 3 { boost = 3 }     // 最多+3
+		newParity := a.ParityShards + boost
+		if newParity > a.MaxParity { newParity = a.MaxParity }
+		if newParity > a.ParityShards {
+			a.ParityShards = newParity
+		}
+		a.consecutiveLoss = 0
+	}
 	a.mu.Unlock()
 }
 
-// Adjust 滑动窗口调整FEC比例（每100包评估一次）
+// Adjust 滑动窗口调整FEC比例 (EWMA平滑版)
 func (a *AdaptiveFEC) Adjust() (data, parity int) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -60,7 +84,7 @@ func (a *AdaptiveFEC) Adjust() (data, parity int) {
 		return a.DataShards, a.ParityShards
 	}
 
-	// 滑动窗口丢包率（最近100包）
+	// 滑动窗口丢包率
 	lostInWindow := 0
 	windowSize := int(a.sent)
 	if windowSize > 100 { windowSize = 100 }
@@ -69,40 +93,50 @@ func (a *AdaptiveFEC) Adjust() (data, parity int) {
 	}
 	lossRate := float64(lostInWindow) / float64(windowSize)
 
-	// 高RTT时增加冗余（重传代价大）
+	// RTT因子
 	rttFactor := 1.0
 	if a.RTT > 100*time.Millisecond { rttFactor = 1.5 }
 	if a.RTT > 300*time.Millisecond { rttFactor = 2.0 }
 
-	// 根据丢包率调整
+	// 基于丢包率计算目标parity
+	var targetParity int
 	switch {
-	case lossRate < 0.01: // <1%
-		a.ParityShards = a.MinParity
-	case lossRate < 0.05: // 1-5%
-		a.ParityShards = int(float64(3) * rttFactor)
-	case lossRate < 0.10: // 5-10%
-		a.ParityShards = int(float64(5) * rttFactor)
-	case lossRate < 0.20: // 10-20%
-		a.ParityShards = int(float64(7) * rttFactor)
-	case lossRate < 0.30: // 20-30%
-		a.ParityShards = int(float64(9) * rttFactor)
-	default: // >30%
-		a.ParityShards = a.MaxParity
+	case lossRate < 0.01:
+		targetParity = a.MinParity
+	case lossRate < 0.05:
+		targetParity = int(float64(3) * rttFactor)
+	case lossRate < 0.10:
+		targetParity = int(float64(5) * rttFactor)
+	case lossRate < 0.20:
+		targetParity = int(float64(7) * rttFactor)
+	case lossRate < 0.30:
+		targetParity = int(float64(9) * rttFactor)
+	default:
+		targetParity = a.MaxParity
 	}
 
-	// FEC有效性反馈调整
+	// v1.4.2: EWMA平滑FEC有效性(防震荡)
 	if a.fecCodec != nil {
-		eff := a.fecCodec.FECEffectiveness()
-		if eff > 0.8 && a.ParityShards > a.MinParity+1 {
-			a.ParityShards--
-		} else if eff < 0.3 && lossRate > 0.05 {
-			a.ParityShards++
+		rawEff := a.fecCodec.FECEffectiveness()
+		a.ewmaEff = a.ewmaEff*(1-a.ewmaAlpha) + rawEff*a.ewmaAlpha
+
+		if a.ewmaEff > 0.8 && targetParity > a.MinParity+1 {
+			targetParity-- // FEC频繁恢复 → 冗余够，微降
+		} else if a.ewmaEff < 0.3 && lossRate > 0.05 {
+			targetParity++ // FEC效果差 → 冗余不足，微升
 		}
 	}
 
 	// 限幅
-	if a.ParityShards < a.MinParity { a.ParityShards = a.MinParity }
-	if a.ParityShards > a.MaxParity { a.ParityShards = a.MaxParity }
+	if targetParity < a.MinParity { targetParity = a.MinParity }
+	if targetParity > a.MaxParity { targetParity = a.MaxParity }
+
+	// v1.4.2: 每次最多变化±2(防剧烈震荡)
+	diff := targetParity - a.ParityShards
+	if diff > 2 { diff = 2 }
+	if diff < -2 { diff = -2 }
+	a.ParityShards += diff
+	a.lastParity = a.ParityShards
 
 	// 重置统计
 	a.sent = 0
@@ -110,15 +144,3 @@ func (a *AdaptiveFEC) Adjust() (data, parity int) {
 
 	return a.DataShards, a.ParityShards
 }
-
-/*
-效果:
-  丢包<1%  → 10:1 (冗余最小，带宽省)
-  丢包5%   → 10:2
-  丢包10%  → 10:3 (默认)
-  丢包20%  → 10:5
-  丢包30%  → 10:7
-  丢包>30% → 10:10 (最大冗余)
-
-始终是最优比例，不浪费带宽也不丢包
-*/
