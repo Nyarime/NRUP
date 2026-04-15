@@ -66,7 +66,16 @@ func (f *FECCodec) Encode(data []byte) [][]byte {
 		shards[i] = make([]byte, shardSize)
 	}
 
-	f.encoder.Encode(shards)
+	// FEC编码: RS或LDPC
+	if f.useLDPC && f.ldpcCodec != nil {
+		dataOnly := shards[:f.dataShards]
+		encoded := f.ldpcCodec.Encode(dataOnly)
+		if encoded != nil && len(encoded) == len(shards) {
+			shards = encoded
+		}
+	} else {
+		f.encoder.Encode(shards)
+	}
 
 	frames := make([][]byte, 0, total)
 	for i := 0; i < total; i++ {
@@ -122,7 +131,12 @@ func (f *FECCodec) Decode(frame []byte) []byte {
 			if !group.present[i] { group.shards[i] = nil; lostCount++ }
 		}
 		f.fecDecodes.Add(1)
-		err := f.encoder.Reconstruct(group.shards)
+		var err error
+		if f.useLDPC && f.ldpcCodec != nil {
+			err = f.ldpcCodec.Decode(group.shards)
+		} else {
+			err = f.encoder.Reconstruct(group.shards)
+		}
 		if err == nil {
 			group.decoded = true
 			if lostCount > 0 {
