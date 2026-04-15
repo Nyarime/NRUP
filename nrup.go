@@ -31,6 +31,7 @@ type Config struct {
 	HandshakeTimeout time.Duration
 	IdleTimeout      time.Duration
 	StreamMode       bool
+	FECType       FECType  // rs(默认) / raptorq / ldpc
 	SACKInterval     int // SACK频率(每N包发一次，默认3)
 }
 
